@@ -6,7 +6,7 @@
 
 **Architecture:** Clean architecture ported/adapted from `lumen-app-backend` (`delivery → usecase → repository → model`), Echo + GORM/pgx + Redis + sql-migrate + zap. See `docs/superpowers/specs/2026-07-29-laverte-home-backend-design.md`.
 
-**Tech Stack:** Go 1.25, Echo v4, GORM + `gorm.io/driver/postgres`, `jackc/pgx/v5`, Redis (`redis/go-redis/v9`), `rubenv/sql-migrate`, `golang-jwt/jwt/v5`, `golang.org/x/oauth2`, `google.golang.org/api/calendar/v3`, `robfig/cron/v3`, `go.uber.org/zap`, `kelseyhightower/envconfig`, `joho/godotenv`.
+**Tech Stack:** Go 1.25, Echo v4 (+ `go-playground/validator/v10` registered as Echo's Validator), GORM + `gorm.io/driver/postgres`, `jackc/pgx/v5`, Redis (`redis/go-redis/v9`), `rubenv/sql-migrate`, `golang-jwt/jwt/v5`, `golang.org/x/oauth2`, `google.golang.org/api/calendar/v3`, `robfig/cron/v3`, `go.uber.org/zap`, `kelseyhightower/envconfig`, `joho/godotenv`.
 
 **Shape:** 18 tasks in 5 phases. Phase 0 (1-6) foundation + auth; Phase 1 (7-9) home/pricing/booking domain; Phase 2 (10-13) blocked slots, SePay rail, guest booking + webhook; Phase 3 (14-15) Calendar/ZNS/email adapters; Phase 4 (16-18) admin ops, cron jobs, revenue + final verification.
 
@@ -54,6 +54,7 @@
 cd /Users/gunnguyen/go/src/github.com/johnquangdev/laverte-home
 go mod init github.com/johnquangdev/laverte-home
 go get github.com/labstack/echo/v4@v4.15.4
+go get github.com/go-playground/validator/v10@v10.30.3
 go get github.com/joho/godotenv@v1.5.1
 go get github.com/kelseyhightower/envconfig@v1.4.0
 go get go.uber.org/zap@v1.28.0
@@ -2551,6 +2552,9 @@ func (h *Handler) callback(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
+	}
 	resp, err := h.uc.Callback(c.Request().Context(), req)
 	if err != nil {
 		return h.handleErr(c, err)
@@ -2562,6 +2566,9 @@ func (h *Handler) refresh(c echo.Context) error {
 	var req payload.RefreshRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
 	}
 	resp, err := h.uc.RefreshToken(c.Request().Context(), req.RefreshToken)
 	if err != nil {
@@ -2726,6 +2733,9 @@ func (h *Handler) grantAdmin(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
+	}
 	grantedBy := middleware.ClaimsFromContext(c).UserID
 	if err := h.uc.GrantAdmin(c.Request().Context(), req, grantedBy); err != nil {
 		return h.handleErr(c, err)
@@ -2774,9 +2784,12 @@ func Init(g *echo.Group, uc adminuc.IUseCase, handleErr HandleErrFunc, handleOK 
 package http
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"go.uber.org/zap"
@@ -2817,9 +2830,33 @@ type Deps struct {
 	AdminRoleResolver jwtmw.AdminRoleResolver
 }
 
+// requestValidator runs the `validate:` struct tags on bound payloads. Without a
+// validator registered on Echo those tags are inert decoration — the tags existed
+// before this did, and every "required" silently passed.
+type requestValidator struct{ v *validator.Validate }
+
+// Validate returns an apperr so a bad payload answers 400 through the shared
+// handleErr path, instead of leaking go-playground's internal field message.
+func (rv *requestValidator) Validate(i any) error {
+	if err := rv.v.Struct(i); err != nil {
+		var invalid *validator.InvalidValidationError
+		if errors.As(err, &invalid) {
+			return apperr.Internal(err)
+		}
+		var fieldErrs validator.ValidationErrors
+		if errors.As(err, &fieldErrs) && len(fieldErrs) > 0 {
+			f := fieldErrs[0]
+			return apperr.Validation(fmt.Sprintf("truong %q khong hop le (%s)", f.Field(), f.Tag()))
+		}
+		return apperr.Validation("du lieu gui len khong hop le")
+	}
+	return nil
+}
+
 func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	e := echo.New()
 	e.HideBanner = true
+	e.Validator = &requestValidator{v: validator.New()}
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestID())
 	e.Use(middleware.SecureWithConfig(middleware.SecureConfig{
@@ -3556,6 +3593,9 @@ func (h *HomeHandler) create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
+	}
 	resp, err := h.uc.Create(c.Request().Context(), req)
 	if err != nil {
 		return h.handleErr(c, err)
@@ -3571,6 +3611,9 @@ func (h *HomeHandler) update(c echo.Context) error {
 	var req payload.UpdateHomeRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
 	}
 	resp, err := h.uc.Update(c.Request().Context(), uint(id), req)
 	if err != nil {
@@ -3691,13 +3734,52 @@ git commit -m "feat: Home model + admin CRUD"
 ```go
 package model
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 const (
 	PricingRuleTypeHourly    = "hourly"
 	PricingRuleTypeOvernight = "overnight"
 	PricingRuleTypeDay       = "day"
 )
+
+func IsValidPricingRuleType(t string) bool {
+	return t == PricingRuleTypeHourly || t == PricingRuleTypeOvernight || t == PricingRuleTypeDay
+}
+
+// ParseClockMinutes turns an "HH:MM" bound into minutes since midnight. It errors
+// rather than defaulting, because a silent 0 reads as 00:00 and silently widens or
+// narrows an overnight window — changing which bookings are accepted and priced.
+func ParseClockMinutes(hhmm string) (int, error) {
+	var h, m int
+	if n, err := fmt.Sscanf(hhmm, "%d:%d", &h, &m); err != nil || n != 2 {
+		return 0, fmt.Errorf("gio khong dung dinh dang HH:MM: %q", hhmm)
+	}
+	if h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, fmt.Errorf("gio ngoai khoang hop le: %q", hhmm)
+	}
+	return h*60 + m, nil
+}
+
+// ValidateClockWindow reports whether a window's two bounds are usable. Equal
+// bounds are rejected: they would form a zero-width window that silently refuses
+// every booking instead of erroring when the rule is created.
+func ValidateClockWindow(start, end string) error {
+	startMin, err := ParseClockMinutes(start)
+	if err != nil {
+		return err
+	}
+	endMin, err := ParseClockMinutes(end)
+	if err != nil {
+		return err
+	}
+	if startMin == endMin {
+		return fmt.Errorf("khung gio rong: window_start va window_end deu la %q", start)
+	}
+	return nil
+}
 
 // PricingRule defines one price rule for a Home category. WindowStart/End are
 // "HH:MM" strings used only by overnight rules to decide whether a booking's
@@ -3742,6 +3824,11 @@ CREATE TABLE pricing_rules (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_pricing_rules_category_type ON pricing_rules(category, rule_type);
+-- Compute takes the first matching active rule, so two active rules for one
+-- category+type would make a customer's quote depend on row order. Superseded
+-- rows have is_active=false and stay as price history, so they are exempt.
+CREATE UNIQUE INDEX idx_pricing_rules_one_active
+    ON pricing_rules(category, rule_type) WHERE is_active;
 
 -- +migrate Down
 DROP TABLE pricing_rules;
@@ -3761,7 +3848,11 @@ import (
 
 type IRepository interface {
 	Create(ctx context.Context, r *model.PricingRule) error
-	Update(ctx context.Context, r *model.PricingRule) error
+	// Supersede closes rule oldID at `at` and inserts replacement, both in one
+	// transaction. Split across two calls, a failure between them leaves the
+	// category with no active rule and refuses every booking of that type.
+	// Returns gorm.ErrRecordNotFound if oldID does not exist.
+	Supersede(ctx context.Context, oldID uint, replacement *model.PricingRule, at time.Time) error
 	GetByID(ctx context.Context, id uint) (*model.PricingRule, error)
 	// ListActiveByCategory returns is_active rules for category whose
 	// [EffectiveFrom, EffectiveTo) window contains at.
@@ -3791,8 +3882,21 @@ func (r *pgRepository) Create(ctx context.Context, rule *model.PricingRule) erro
 	return r.getDB(ctx).Create(rule).Error
 }
 
-func (r *pgRepository) Update(ctx context.Context, rule *model.PricingRule) error {
-	return r.getDB(ctx).Save(rule).Error
+func (r *pgRepository) Supersede(ctx context.Context, oldID uint, replacement *model.PricingRule, at time.Time) error {
+	return r.getDB(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.PricingRule{}).
+			Where("id = ? AND is_active = true", oldID).
+			Updates(map[string]any{"effective_to": at, "is_active": false})
+		if res.Error != nil {
+			return res.Error
+		}
+		// Zero rows means the id is unknown or already superseded; inserting the
+		// replacement anyway would leave two active rules for the category.
+		if res.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return tx.Create(replacement).Error
+	})
 }
 
 func (r *pgRepository) GetByID(ctx context.Context, id uint) (*model.PricingRule, error) {
@@ -3803,8 +3907,12 @@ func (r *pgRepository) GetByID(ctx context.Context, id uint) (*model.PricingRule
 
 func (r *pgRepository) ListActiveByCategory(ctx context.Context, category string, at time.Time) ([]*model.PricingRule, error) {
 	var rules []*model.PricingRule
+	// Ordered newest-first and deterministic: without it Postgres may return two
+	// overlapping active rules in either order, and Compute takes the first match
+	// — so the same booking could be quoted a different price on each request.
 	err := r.getDB(ctx).
 		Where("category = ? AND is_active = true AND effective_from <= ? AND (effective_to IS NULL OR effective_to > ?)", category, at, at).
+		Order("effective_from DESC, id DESC").
 		Find(&rules).Error
 	return rules, err
 }
@@ -3878,17 +3986,22 @@ func computeHourly(rule *model.PricingRule, start, end time.Time) (int64, error)
 	if rule.BaseHours == nil || rule.BasePrice == nil || rule.ExtraHourPrice == nil {
 		return 0, apperr.Validation("bang gia hourly thieu base_hours/base_price/extra_hour_price")
 	}
-	durationHours := end.Sub(start).Hours()
-	if durationHours <= 0 {
+	// Integer nanoseconds throughout: a float64 hour count would put the rounding
+	// decision at an exact-hour boundary on the money path, and whether that is
+	// safe depends on how time.Duration.Hours() splits its integer and fractional
+	// parts — not something the price a customer pays should rest on.
+	duration := end.Sub(start)
+	if duration <= 0 {
 		return 0, apperr.Validation("end_time phai sau start_time")
 	}
-	if durationHours <= float64(*rule.BaseHours) {
+	base := time.Duration(*rule.BaseHours) * time.Hour
+	if duration <= base {
 		return *rule.BasePrice, nil
 	}
-	extraHours := durationHours - float64(*rule.BaseHours)
-	extraWhole := int64(extraHours)
-	if extraHours > float64(extraWhole) {
-		extraWhole++ // round any partial extra hour up to a full extra-hour charge
+	extra := duration - base
+	extraWhole := int64(extra / time.Hour)
+	if extra%time.Hour > 0 {
+		extraWhole++ // a partial extra hour is charged as a whole one
 	}
 	return *rule.BasePrice + extraWhole**rule.ExtraHourPrice, nil
 }
@@ -3898,31 +4011,41 @@ func computeFlat(rule *model.PricingRule, start time.Time) (int64, error) {
 		return 0, apperr.Validation("bang gia thieu flat_price")
 	}
 	if rule.WindowStart != nil && rule.WindowEnd != nil {
-		if !withinWindow(start, *rule.WindowStart, *rule.WindowEnd) {
+		inside, err := withinWindow(start, *rule.WindowStart, *rule.WindowEnd)
+		if err != nil {
+			return 0, apperr.Internal(err)
+		}
+		if !inside {
 			return 0, apperr.Validation("start_time khong nam trong khung gio ap dung cua rule nay")
 		}
 	}
 	return *rule.FlatPrice, nil
 }
 
-// withinWindow reports whether t's local HH:MM falls in [windowStart,
-// windowEnd), wrapping past midnight when windowEnd <= windowStart (e.g.
-// 22:00-06:00).
-func withinWindow(t time.Time, windowStart, windowEnd string) bool {
-	minutesOfDay := t.Hour()*60 + t.Minute()
-	startMin := hhmmToMinutes(windowStart)
-	endMin := hhmmToMinutes(windowEnd)
-	if startMin <= endMin {
-		return minutesOfDay >= startMin && minutesOfDay < endMin
+// withinWindow reports whether t's clock time falls in [windowStart, windowEnd),
+// wrapping past midnight when windowEnd <= windowStart (e.g. 22:00-06:00). The
+// interval is half-open: a start exactly at windowStart is inside, one exactly at
+// windowEnd is not.
+func withinWindow(t time.Time, windowStart, windowEnd string) (bool, error) {
+	if err := model.ValidateClockWindow(windowStart, windowEnd); err != nil {
+		return false, err
 	}
-	return minutesOfDay >= startMin || minutesOfDay < endMin
+	startMin, err := model.ParseClockMinutes(windowStart)
+	if err != nil {
+		return false, err
+	}
+	endMin, err := model.ParseClockMinutes(windowEnd)
+	if err != nil {
+		return false, err
+	}
+	minutesOfDay := t.Hour()*60 + t.Minute()
+	if startMin < endMin {
+		return minutesOfDay >= startMin && minutesOfDay < endMin, nil
+	}
+	return minutesOfDay >= startMin || minutesOfDay < endMin, nil
 }
 
-func hhmmToMinutes(hhmm string) int {
-	var h, m int
-	fmt.Sscanf(hhmm, "%d:%d", &h, &m)
-	return h*60 + m
-}
+
 ```
 
 - [ ] **Step 7: Write `usecase/pricing/usecase_test.go`**
@@ -4023,6 +4146,105 @@ func TestComputeOvernightOutsideWindowRejected(t *testing.T) {
 	}
 }
 
+// The round-up boundary is the single most delicate line in the money path, so
+// pin both sides of it: an exact multiple of an hour must NOT buy an extra hour,
+// and one second past it must.
+func TestComputeHourlyExactHourBoundaries(t *testing.T) {
+	repo := &fakePricingRuleRepo{rules: []*model.PricingRule{{
+		Category: model.HomeCategoryHome, RuleType: model.PricingRuleTypeHourly,
+		BaseHours: intp(2), BasePrice: int64p(200000), ExtraHourPrice: int64p(50000),
+	}}}
+	uc := New(repo)
+	start := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		dur  time.Duration
+		want int64
+	}{
+		{"exactly base hours charges base only", 2 * time.Hour, 200000},
+		{"one second over base buys a whole hour", 2*time.Hour + time.Second, 250000},
+		{"exactly one extra hour does not buy a second", 3 * time.Hour, 250000},
+		{"one second over that buys the second", 3*time.Hour + time.Second, 300000},
+		{"exactly three extra hours", 5 * time.Hour, 350000},
+	}
+	for _, c := range cases {
+		got, err := uc.Compute(context.Background(), model.HomeCategoryHome,
+			model.PricingRuleTypeHourly, start, start.Add(c.dur), start)
+		if err != nil {
+			t.Fatalf("%s: Compute() error = %v", c.name, err)
+		}
+		if got != c.want {
+			t.Errorf("%s: price = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestComputeDayFlatPrice(t *testing.T) {
+	repo := &fakePricingRuleRepo{rules: []*model.PricingRule{{
+		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeDay,
+		FlatPrice: int64p(900000),
+	}}}
+	uc := New(repo)
+	start := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+
+	got, err := uc.Compute(context.Background(), model.HomeCategoryNest,
+		model.PricingRuleTypeDay, start, start.Add(24*time.Hour), start)
+	if err != nil {
+		t.Fatalf("Compute() error = %v", err)
+	}
+	if got != 900000 {
+		t.Errorf("price = %d, want 900000", got)
+	}
+}
+
+// A day rule carries no window, so it must not be gated on one.
+func TestComputeDayIgnoresTimeOfDay(t *testing.T) {
+	repo := &fakePricingRuleRepo{rules: []*model.PricingRule{{
+		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeDay,
+		FlatPrice: int64p(900000),
+	}}}
+	uc := New(repo)
+	for _, hour := range []int{0, 3, 13, 23} {
+		start := time.Date(2026, 8, 1, hour, 0, 0, 0, time.UTC)
+		if _, err := uc.Compute(context.Background(), model.HomeCategoryNest,
+			model.PricingRuleTypeDay, start, start.Add(24*time.Hour), start); err != nil {
+			t.Errorf("hour %02d: Compute() error = %v", hour, err)
+		}
+	}
+}
+
+// A malformed window must surface, not silently behave as 00:00 — that would
+// widen or narrow the window and change which bookings are accepted.
+func TestComputeOvernightRejectsMalformedWindow(t *testing.T) {
+	repo := &fakePricingRuleRepo{rules: []*model.PricingRule{{
+		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeOvernight,
+		FlatPrice: int64p(500000), WindowStart: strp("2200"), WindowEnd: strp("06:00"),
+	}}}
+	uc := New(repo)
+	start := time.Date(2026, 8, 1, 23, 0, 0, 0, time.UTC)
+
+	if _, err := uc.Compute(context.Background(), model.HomeCategoryNest,
+		model.PricingRuleTypeOvernight, start, start.Add(8*time.Hour), start); err == nil {
+		t.Fatal("Compute() accepted a malformed window_start, want an error")
+	}
+}
+
+// windowStart == windowEnd would otherwise refuse every booking silently.
+func TestComputeOvernightRejectsZeroWidthWindow(t *testing.T) {
+	repo := &fakePricingRuleRepo{rules: []*model.PricingRule{{
+		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeOvernight,
+		FlatPrice: int64p(500000), WindowStart: strp("22:00"), WindowEnd: strp("22:00"),
+	}}}
+	uc := New(repo)
+	start := time.Date(2026, 8, 1, 22, 0, 0, 0, time.UTC)
+
+	if _, err := uc.Compute(context.Background(), model.HomeCategoryNest,
+		model.PricingRuleTypeOvernight, start, start.Add(8*time.Hour), start); err == nil {
+		t.Fatal("Compute() accepted a zero-width window, want an error")
+	}
+}
+
 func TestComputeNoMatchingRule(t *testing.T) {
 	uc := New(&fakePricingRuleRepo{})
 	start := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
@@ -4096,6 +4318,9 @@ import (
 )
 
 type IUseCase interface {
+	// Create validates the whole rule before storing it. A rule that Compute
+	// cannot price — or that would price to a negative amount — must never
+	// reach the table, because the next thing to read it is a customer's quote.
 	Create(ctx context.Context, req payload.UpsertPricingRuleRequest) (*presenter.PricingRuleResponse, error)
 	// Supersede closes rule `id` and inserts req as its replacement, so a price
 	// change never rewrites the rule a past booking was charged under.
@@ -4124,9 +4349,63 @@ type UseCase struct{ repo pricingrulerepo.IRepository }
 
 func New(repo pricingrulerepo.IRepository) IUseCase { return &UseCase{repo: repo} }
 
-func (uc *UseCase) Create(ctx context.Context, req payload.UpsertPricingRuleRequest) (*presenter.PricingRuleResponse, error) {
+// validateRule rejects every rule shape Compute cannot handle. Each check exists
+// because the alternative is discovering it in a customer's price: a nil
+// BaseHours makes an hourly rule unpriceable, a negative price charges a
+// negative amount, and an overnight rule missing its window silently applies at
+// any hour of the day like a flat day rate.
+func validateRule(req payload.UpsertPricingRuleRequest) error {
 	if !model.IsValidHomeCategory(req.Category) {
-		return nil, apperr.Validation("category khong hop le")
+		return apperr.Validation("category khong hop le")
+	}
+	if !model.IsValidPricingRuleType(req.RuleType) {
+		return apperr.Validation("rule_type phai la 'hourly', 'overnight' hoac 'day'")
+	}
+
+	positive := func(name string, v *int64) error {
+		if v == nil {
+			return apperr.Validation(name + " la bat buoc")
+		}
+		if *v <= 0 {
+			return apperr.Validation(name + " phai lon hon 0")
+		}
+		return nil
+	}
+
+	switch req.RuleType {
+	case model.PricingRuleTypeHourly:
+		if req.BaseHours == nil || *req.BaseHours <= 0 {
+			return apperr.Validation("base_hours phai lon hon 0")
+		}
+		if err := positive("base_price", req.BasePrice); err != nil {
+			return err
+		}
+		if err := positive("extra_hour_price", req.ExtraHourPrice); err != nil {
+			return err
+		}
+	case model.PricingRuleTypeOvernight:
+		if err := positive("flat_price", req.FlatPrice); err != nil {
+			return err
+		}
+		// Without both bounds computeFlat skips the window check entirely, so the
+		// rule would quietly apply at any hour instead of only overnight.
+		if req.WindowStart == nil || req.WindowEnd == nil {
+			return apperr.Validation("rule overnight phai co ca window_start va window_end")
+		}
+		if err := model.ValidateClockWindow(*req.WindowStart, *req.WindowEnd); err != nil {
+			return apperr.Validation(err.Error())
+		}
+	case model.PricingRuleTypeDay:
+		if err := positive("flat_price", req.FlatPrice); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (uc *UseCase) Create(ctx context.Context, req payload.UpsertPricingRuleRequest) (*presenter.PricingRuleResponse, error) {
+	if err := validateRule(req); err != nil {
+		return nil, err
 	}
 	r := &model.PricingRule{
 		Category: req.Category, RuleType: req.RuleType, BaseHours: req.BaseHours, BasePrice: req.BasePrice,
@@ -4145,27 +4424,24 @@ func (uc *UseCase) Create(ctx context.Context, req payload.UpsertPricingRuleRequ
 // timestamp — mutating a live rule in place would retroactively change what
 // already-created bookings were priced under.
 func (uc *UseCase) Supersede(ctx context.Context, id uint, req payload.UpsertPricingRuleRequest) (*presenter.PricingRuleResponse, error) {
-	if !model.IsValidHomeCategory(req.Category) {
-		return nil, apperr.Validation("category khong hop le")
-	}
-	old, err := uc.repo.GetByID(ctx, id)
-	if err != nil {
-		return nil, apperr.NotFound(err)
+	if err := validateRule(req); err != nil {
+		return nil, err
 	}
 
 	now := time.Now()
-	old.EffectiveTo = &now
-	old.IsActive = false
-	if err := uc.repo.Update(ctx, old); err != nil {
-		return nil, apperr.Internal(err)
-	}
-
 	replacement := &model.PricingRule{
 		Category: req.Category, RuleType: req.RuleType, BaseHours: req.BaseHours, BasePrice: req.BasePrice,
 		ExtraHourPrice: req.ExtraHourPrice, WindowStart: req.WindowStart, WindowEnd: req.WindowEnd,
 		FlatPrice: req.FlatPrice, EffectiveFrom: now, IsActive: true,
 	}
-	if err := uc.repo.Create(ctx, replacement); err != nil {
+	// One transaction, in the repository: closing the old rule and inserting its
+	// replacement as two independent writes means a failure between them leaves
+	// the category with no active rule of that type at all, and every booking of
+	// that type is refused until someone notices.
+	if err := uc.repo.Supersede(ctx, id, replacement, now); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperr.NotFound(err)
+		}
 		return nil, apperr.Internal(err)
 	}
 	resp := presenter.ToPricingRuleResponse(replacement)
@@ -4351,6 +4627,9 @@ func (h *PricingRuleHandler) create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
+	}
 	resp, err := h.uc.Create(c.Request().Context(), req)
 	if err != nil {
 		return h.handleErr(c, err)
@@ -4366,6 +4645,9 @@ func (h *PricingRuleHandler) supersede(c echo.Context) error {
 	var req payload.UpsertPricingRuleRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
 	}
 	resp, err := h.uc.Supersede(c.Request().Context(), uint(id), req)
 	if err != nil {
@@ -5273,6 +5555,9 @@ func (h *BlockedSlotHandler) create(c echo.Context) error {
 	var req payload.CreateBlockedSlotRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
 	}
 	adminID := middleware.ClaimsFromContext(c).UserID
 	resp, err := h.uc.Create(c.Request().Context(), req, adminID)
@@ -6772,6 +7057,12 @@ func bindBookingRequest(next echo.HandlerFunc) echo.HandlerFunc {
 		var req payload.CreateBookingRequest
 		if err := c.Bind(&req); err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		}
+		// Validate here, not in the handler: this is the public guest entry point
+		// and the per-phone limiter below keys on customer_phone, so an empty or
+		// malformed phone must be rejected before it becomes a rate-limit key.
+		if err := c.Validate(&req); err != nil {
+			return handleErr(c, err)
 		}
 		c.Set("booking_request", req)
 		c.Set("customer_phone", req.CustomerPhone)
@@ -9372,6 +9663,9 @@ func (h *BookingHandler) create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
+	}
 	adminID := middleware.ClaimsFromContext(c).UserID
 	resp, err := h.uc.CreateWalkIn(c.Request().Context(), req, adminID)
 	if err != nil {
@@ -9388,6 +9682,9 @@ func (h *BookingHandler) setLockCode(c echo.Context) error {
 	var req payload.SetLockCodeRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
 	}
 	if err := h.uc.SetLockCode(c.Request().Context(), uint(id), req.Code); err != nil {
 		return h.handleErr(c, err)
