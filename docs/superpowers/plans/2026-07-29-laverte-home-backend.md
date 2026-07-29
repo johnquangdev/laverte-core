@@ -8764,9 +8764,13 @@ func (g *googleCalendar) DeleteEvent(ctx context.Context, calendarID, eventID st
 // formatting can be asserted without a Google API round-trip.
 func buildEvent(cfg *config.Config, b *model.Booking) *calendar.Event {
 	return &calendar.Event{
-		Summary: fmt.Sprintf("Booking #%d — %s (%s)", b.ID, b.CustomerName, b.CustomerPhone),
-		Description: fmt.Sprintf("Loai: %s\nGia: %d VND\nSDT: %s",
-			b.BookingType, b.ComputedPrice, b.CustomerPhone),
+		// The summary is the only field visible in month and agenda views, and in
+		// previews, without opening the event — and these calendars get shared with
+		// cleaning and maintenance staff. Guest name and phone stay in the
+		// description so a share for scheduling does not hand out contact details.
+		Summary: fmt.Sprintf("Booking #%d — %s", b.ID, b.BookingType),
+		Description: fmt.Sprintf("Khach: %s\nSDT: %s\nGia: %d VND",
+			b.CustomerName, b.CustomerPhone, b.ComputedPrice),
 		Start: &calendar.EventDateTime{
 			DateTime: b.StartTime.Format(time.RFC3339),
 			TimeZone: cfg.GoogleCalendarTimeZone,
