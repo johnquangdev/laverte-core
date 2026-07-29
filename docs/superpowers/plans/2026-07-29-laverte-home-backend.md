@@ -597,7 +597,11 @@ volumes:
 - [ ] **Step 2: Start local infra**
 
 Run: `docker compose -f docker-compose.dev.yml up -d`
-Expected: both containers report `running`/`healthy` via `docker compose -f docker-compose.dev.yml ps`
+Expected: `docker compose -f docker-compose.dev.yml ps` lists both containers as
+`Up`, with Postgres published on host 55432 and Redis on 6380. Neither image
+declares a HEALTHCHECK, so `Up` is the strongest status they ever report — do not
+wait for `healthy`. Confirm Postgres really accepts connections with the
+migration test in Step 8 rather than by reading the status column.
 
 - [ ] **Step 3: Write `client/postgres/client.go`**
 
