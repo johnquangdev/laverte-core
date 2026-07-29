@@ -70,9 +70,14 @@ func main() {
 	pricingUC := pricinguc.New(pricingRules)
 	bookingUC := bookinguc.New(bookings, homes, blockedSlots, payments, pricingUC, sepay, *cfg, log)
 
-	// TODO(Google Calendar adapter): wire the real service-account client;
-	// bookings confirm without a calendar event until then.
-	calendarSvc := gcalendar.NewNoop()
+	// Calendar push is best-effort per design doc §5, so a missing or invalid
+	// service-account key downgrades to the noop instead of aborting boot.
+	var calendarSvc = gcalendar.NewNoop()
+	if cal, err := gcalendar.NewGoogle(cfg); err != nil {
+		log.Warn("google calendar disabled", zap.Error(err))
+	} else {
+		calendarSvc = cal
+	}
 	// TODO(ZNS/email notifier): wire the real adapter; guests and admins get
 	// no booking notifications until then.
 	notifier := notify.NewNoop()
