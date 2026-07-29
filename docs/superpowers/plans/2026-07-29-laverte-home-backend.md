@@ -473,7 +473,7 @@ func main() {
 	cfg := config.GetConfig()
 
 	log, _ := zap.NewProduction()
-	defer log.Sync()
+	defer func() { _ = log.Sync() }()
 
 	srv := httpserver.NewServer(*cfg, log)
 	log.Info("starting server", zap.String("port", cfg.Port))
@@ -491,7 +491,7 @@ APP_NAME=laverte-home-backend
 ENVIRONMENT=development
 
 POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
+POSTGRES_PORT=55432
 POSTGRES_USER=laverte
 POSTGRES_PASSWORD=laverte
 POSTGRES_DB=laverte
@@ -508,7 +508,7 @@ GOOGLE_REDIRECT_URI=
 FRONTEND_URL=http://localhost:3000
 CORS_ORIGINS=http://localhost:3000
 
-REDIS_URL=redis://localhost:6379
+REDIS_URL=redis://localhost:6380
 
 ADMIN_USER_IDS=
 
@@ -580,13 +580,15 @@ services:
       POSTGRES_PASSWORD: laverte
       POSTGRES_DB: laverte
     ports:
-      - "5432:5432"
+      # Host 5432/6379 are taken by another project's stack on this machine, so
+      # bind laverte's stack to its own ports rather than fighting for them.
+      - "55432:5432"
     volumes:
       - laverte_pg_data:/var/lib/postgresql/data
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
 
 volumes:
   laverte_pg_data:
@@ -703,7 +705,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("migrate: open db: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if cerr := db.Close(); cerr != nil {
+			log.Error("migrate: close db", zap.Error(cerr))
+		}
+	}()
 
 	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: migrations.FS, Root: "."}
 	n, err := migrate.Exec(db, "postgres", src, migrate.Up)
@@ -730,7 +736,7 @@ import (
 
 // requires `docker compose -f docker-compose.dev.yml up -d` and
 // TEST_DATABASE_URL, e.g.
-// postgres://laverte:laverte@localhost:5432/laverte?sslmode=disable
+// postgres://laverte:laverte@localhost:55432/laverte?sslmode=disable
 func TestMigrationsApplyCleanly(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -740,7 +746,11 @@ func TestMigrationsApplyCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if cerr := db.Close(); cerr != nil {
+			t.Errorf("close db: %v", cerr)
+		}
+	}()
 
 	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: FS, Root: "."}
 	if _, err := migrate.Exec(db, "postgres", src, migrate.Up); err != nil {
@@ -754,7 +764,7 @@ func TestMigrationsApplyCleanly(t *testing.T) {
 
 - [ ] **Step 8: Run the migration test against the running Postgres container**
 
-Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:5432/laverte?sslmode=disable go test ./migrations/... -v`
+Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:55432/laverte?sslmode=disable go test ./migrations/... -v`
 Expected: PASS — the migration applies (up) and rolls back (down) cleanly. Without `TEST_DATABASE_URL` the test SKIPs, which is the intended behaviour on a machine with no local Postgres.
 
 - [ ] **Step 9: Modify `cmd/main.go` to run migrations before starting the server**
@@ -778,7 +788,7 @@ func main() {
 	cfg := config.GetConfig()
 
 	log, _ := zap.NewProduction()
-	defer log.Sync()
+	defer func() { _ = log.Sync() }()
 
 	if err := runMigrations(cfg, log); err != nil {
 		log.Fatal("auto-migration failed", zap.Error(err))
@@ -796,7 +806,11 @@ func runMigrations(cfg *config.Config, log *zap.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() {
+		if cerr := db.Close(); cerr != nil {
+			log.Error("migrate: close db", zap.Error(cerr))
+		}
+	}()
 
 	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: migrations.FS, Root: "."}
 	n, err := migrate.Exec(db, "postgres", src, migrate.Up)
@@ -1258,7 +1272,7 @@ func (g *googleOAuth) Exchange(ctx context.Context, code, _ string) (ExchangeRes
 	if err != nil {
 		return ExchangeResult{}, fmt.Errorf("oauth/google: userinfo request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -2700,7 +2714,7 @@ func main() {
 	cfg := config.GetConfig()
 
 	log, _ := zap.NewProduction()
-	defer log.Sync()
+	defer func() { _ = log.Sync() }()
 
 	if err := runMigrations(cfg, log); err != nil {
 		log.Fatal("auto-migration failed", zap.Error(err))
@@ -2743,7 +2757,11 @@ func runMigrations(cfg *config.Config, log *zap.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() {
+		if cerr := db.Close(); cerr != nil {
+			log.Error("migrate: close db", zap.Error(cerr))
+		}
+	}()
 
 	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: migrations.FS, Root: "."}
 	n, err := migrate.Exec(db, "postgres", src, migrate.Up)
@@ -4298,8 +4316,15 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("migrate up: %v", err)
 	}
 	t.Cleanup(func() {
-		sqlDB.Exec("TRUNCATE bookings, homes RESTART IDENTITY CASCADE")
-		sqlDB.Close()
+		// Truncate rather than migrate-down: these tests share one database, so
+		// each needs a clean slate without tearing the schema out from under a
+		// sibling test.
+		if _, err := sqlDB.Exec("TRUNCATE bookings, homes RESTART IDENTITY CASCADE"); err != nil {
+			t.Errorf("truncate: %v", err)
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close db: %v", err)
+		}
 	})
 
 	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
@@ -4407,7 +4432,7 @@ func TestCreateAllowsOverlapWhenFirstIsCancelled(t *testing.T) {
 
 - [ ] **Step 6: Run the integration test against docker-compose Postgres**
 
-Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:5432/laverte?sslmode=disable go test ./repository/booking/... -v`
+Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:55432/laverte?sslmode=disable go test ./repository/booking/... -v`
 Expected: PASS on all three tests — confirms the exclusion constraint blocks true overlaps, allows adjacent/non-overlapping bookings, and ignores cancelled rows.
 
 - [ ] **Step 7: Build, vet, commit**
@@ -4940,7 +4965,7 @@ and add `BlockedSlotUC: blockedSlotUC,` to the `httpserver.Deps{...}` literal.
 
 - [ ] **Step 16: Verify migration 0005 applies and rolls back against docker-compose Postgres**
 
-Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:5432/laverte?sslmode=disable go test ./migrations/... -v`
+Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:55432/laverte?sslmode=disable go test ./migrations/... -v`
 Expected: PASS — `TestMigrationsApplyCleanly` now walks 0001→0005 up then all the way down, proving `blocked_slots`' FK to `homes(id)` drops in the right order.
 
 - [ ] **Step 17: Build, vet, test, commit**
@@ -5037,7 +5062,7 @@ DROP TABLE payments;
 
 - [ ] **Step 3: Verify migration 0006 applies and rolls back**
 
-Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:5432/laverte?sslmode=disable go test ./migrations/... -v`
+Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:55432/laverte?sslmode=disable go test ./migrations/... -v`
 Expected: PASS — proves the partial unique index and the `bookings(id)` FK apply and drop cleanly in sequence with 0001→0005.
 
 - [ ] **Step 4: Write `repository/payment/interface.go`**
@@ -5162,8 +5187,15 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("migrate up: %v", err)
 	}
 	t.Cleanup(func() {
-		sqlDB.Exec("TRUNCATE payments, bookings, homes RESTART IDENTITY CASCADE")
-		sqlDB.Close()
+		// Truncate rather than migrate-down: these tests share one database, so
+		// each needs a clean slate without tearing the schema out from under a
+		// sibling test.
+		if _, err := sqlDB.Exec("TRUNCATE payments, bookings, homes RESTART IDENTITY CASCADE"); err != nil {
+			t.Errorf("truncate: %v", err)
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close db: %v", err)
+		}
 	})
 
 	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
@@ -5285,7 +5317,7 @@ func TestGetByBookingIDAndSumPaidBetween(t *testing.T) {
 
 - [ ] **Step 7: Run the payment repository integration tests**
 
-Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:5432/laverte?sslmode=disable go test ./repository/payment/... -v`
+Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:55432/laverte?sslmode=disable go test ./repository/payment/... -v`
 Expected: PASS on both tests — confirms the conditional UPDATE settles exactly once and that `SumPaidBetween` counts only paid rows inside the window.
 
 - [ ] **Step 8: Write `util/checkout/interface.go`**
@@ -7612,7 +7644,7 @@ func (z *ZNSNotifier) send(ctx context.Context, phone, templateID string, data m
 	if err != nil {
 		return fmt.Errorf("notify/zns: post %s: %w", z.endpoint, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var out znsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -10016,7 +10048,7 @@ Expected: PASS for every package. The integration tests in `migrations` and `rep
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d
-TEST_DATABASE_URL=postgres://laverte:laverte@localhost:5432/laverte?sslmode=disable go test ./... -v
+TEST_DATABASE_URL=postgres://laverte:laverte@localhost:55432/laverte?sslmode=disable go test ./... -v
 ```
 
 Expected: PASS, now including `TestMigrationsApplyCleanly`, the three exclusion-constraint tests in `repository/booking` (overlap rejected, adjacent allowed, cancelled ignored), and the payment-idempotency webhook tests.
