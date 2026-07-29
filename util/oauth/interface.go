@@ -1,4 +1,3 @@
-//nolint:staticcheck // package name required by API contract (Tasks 5 and 6 import oauth.IOAuthProvider)
 package oauth
 
 import "context"

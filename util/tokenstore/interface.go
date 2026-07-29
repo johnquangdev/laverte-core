@@ -1,5 +1,4 @@
-//nolint:staticcheck // package name required by API contract (Tasks 5 and 6 import token_store.ITokenStore)
-package token_store
+package tokenstore
 
 import "context"
 
