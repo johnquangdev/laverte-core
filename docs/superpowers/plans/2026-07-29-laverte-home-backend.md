@@ -869,6 +869,15 @@ type Result struct {
 // ILimiter is a fixed-window request counter keyed by an arbitrary string
 // (per-IP or per-phone). Backed by Redis in production, in-memory for tests.
 type ILimiter interface {
+	// Allow records one hit against key and reports whether it stays within
+	// limit requests per window.
+	//
+	// Result is only meaningful when err is nil — on error it is the zero
+	// value, whose Allowed is false. Callers MUST branch on err before reading
+	// Allowed, or a backend outage reads as "deny everything". Whether an
+	// outage fails open or closed is deliberately the caller's policy: the HTTP
+	// middleware fails open, so an infra blip degrades protection rather than
+	// taking the API down.
 	Allow(ctx context.Context, key string, limit int, window time.Duration) (Result, error)
 }
 ```
@@ -880,6 +889,7 @@ package ratelimit
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -897,13 +907,18 @@ func NewRedis(cfg *config.Config) ILimiter {
 	return &redisLimiter{client: redis.NewClient(opt)}
 }
 
+// Allow uses a plain pipeline on purpose — no MULTI/EXEC, no Lua script. INCR
+// alone is atomic, so concurrent callers on one key each get a distinct
+// strictly-increasing count, and that count alone decides the verdict. ExpireNX
+// is idempotent, so racing first-hits settle on whichever TTL lands first, and
+// PTTL only feeds the Retry-After hint.
 func (r *redisLimiter) Allow(ctx context.Context, key string, limit int, window time.Duration) (Result, error) {
 	pipe := r.client.Pipeline()
 	incr := pipe.Incr(ctx, key)
 	pipe.ExpireNX(ctx, key, window)
 	pttl := pipe.PTTL(ctx, key)
 	if _, err := pipe.Exec(ctx); err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("ratelimit: allow %q: %w", key, err)
 	}
 
 	if incr.Val() <= int64(limit) {
