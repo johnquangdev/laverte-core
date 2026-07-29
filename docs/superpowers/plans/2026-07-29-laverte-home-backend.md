@@ -7567,21 +7567,26 @@ import (
 // context. Echo runs every middleware before the handler, so the per-phone
 // limiter can only see a phone that something earlier in the chain put there;
 // the parsed struct rides along so the handler never re-reads the body.
-func bindBookingRequest(next echo.HandlerFunc) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		var req payload.CreateBookingRequest
-		if err := c.Bind(&req); err != nil {
-			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+//
+// It is a factory rather than a plain middleware so it can close over the shared
+// handleErr, which Init receives as a parameter.
+func bindBookingRequest(handleErr HandleErrFunc) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			var req payload.CreateBookingRequest
+			if err := c.Bind(&req); err != nil {
+				return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+			}
+			// Validate here, not in the handler: this is the public guest entry point
+			// and the per-phone limiter below keys on customer_phone, so an empty or
+			// malformed phone must be rejected before it becomes a rate-limit key.
+			if err := c.Validate(&req); err != nil {
+				return handleErr(c, err)
+			}
+			c.Set("booking_request", req)
+			c.Set("customer_phone", req.CustomerPhone)
+			return next(c)
 		}
-		// Validate here, not in the handler: this is the public guest entry point
-		// and the per-phone limiter below keys on customer_phone, so an empty or
-		// malformed phone must be rejected before it becomes a rate-limit key.
-		if err := c.Validate(&req); err != nil {
-			return handleErr(c, err)
-		}
-		c.Set("booking_request", req)
-		c.Set("customer_phone", req.CustomerPhone)
-		return next(c)
 	}
 }
 
@@ -7589,7 +7594,7 @@ func bindBookingRequest(next echo.HandlerFunc) echo.HandlerFunc {
 // given order: bind first, then the per-phone limiter, then the handler.
 func Init(g *echo.Group, uc bookinguc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc, phoneLimit echo.MiddlewareFunc) {
 	h := newHandler(uc, handleErr, handleOK)
-	g.POST("", h.create, bindBookingRequest, phoneLimit)
+	g.POST("", h.create, bindBookingRequest(handleErr), phoneLimit)
 }
 ```
 
