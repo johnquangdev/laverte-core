@@ -2260,12 +2260,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"github.com/johnquangdev/laverte-home/config"
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/payload"
 	"github.com/johnquangdev/laverte-home/presenter"
+	apperr "github.com/johnquangdev/laverte-home/errors"
 	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refreshtoken"
 	userrepo "github.com/johnquangdev/laverte-home/repository/user"
 	"github.com/johnquangdev/laverte-home/util"
@@ -2279,6 +2281,7 @@ type UseCase struct {
 	oauth      oauth.IOAuthProvider
 	tokenStore tokenstore.ITokenStore
 	cfg        config.Config
+	log        *zap.Logger
 }
 
 func New(
@@ -2287,8 +2290,9 @@ func New(
 	oauthSvc oauth.IOAuthProvider,
 	tokenStore tokenstore.ITokenStore,
 	cfg config.Config,
+	log *zap.Logger,
 ) IUseCase {
-	return &UseCase{userRepo: userRepo, tokenRepo: tokenRepo, oauth: oauthSvc, tokenStore: tokenStore, cfg: cfg}
+	return &UseCase{userRepo: userRepo, tokenRepo: tokenRepo, oauth: oauthSvc, tokenStore: tokenStore, cfg: cfg, log: log}
 }
 
 func (uc *UseCase) LoginURL(ctx context.Context) (*presenter.GoogleLoginURLResponse, error) {
@@ -2308,7 +2312,7 @@ func (uc *UseCase) Callback(ctx context.Context, req payload.GoogleCallbackReque
 		return nil, err
 	}
 	if !ok {
-		return nil, errors.New("invalid or expired oauth state")
+		return nil, apperr.Unauthorized(errors.New("invalid or expired oauth state"))
 	}
 
 	info, err := uc.oauth.Exchange(ctx, req.Code, req.State)
@@ -2333,15 +2337,23 @@ func (uc *UseCase) Callback(ctx context.Context, req payload.GoogleCallbackReque
 func (uc *UseCase) RefreshToken(ctx context.Context, refreshTokenStr string) (*presenter.SessionResponse, error) {
 	claims, err := util.ParseToken(uc.cfg.JWTRefreshSecret, refreshTokenStr)
 	if err != nil {
-		return nil, errors.New("invalid refresh token")
+		return nil, apperr.Unauthorized(errors.New("invalid refresh token"))
 	}
 
 	stored, err := uc.tokenRepo.GetByTokenID(ctx, claims.TokenID)
 	if err != nil || stored.RevokedAt != nil {
 		if err == nil {
-			_ = uc.tokenRepo.RevokeFamily(ctx, stored.FamilyID)
+			// Replaying a revoked token means it leaked, so the whole family dies
+			// with it. A failure here leaves the leaked family live, which is the
+			// exact scenario this branch exists for — it must not pass silently.
+			if rerr := uc.tokenRepo.RevokeFamily(ctx, stored.FamilyID); rerr != nil {
+				uc.log.Error("refresh-token reuse detected but family revoke failed",
+					zap.String("family_id", stored.FamilyID),
+					zap.Uint("user_id", claims.UserID),
+					zap.Error(rerr))
+			}
 		}
-		return nil, errors.New("refresh token revoked or not found")
+		return nil, apperr.Unauthorized(errors.New("refresh token revoked or not found"))
 	}
 
 	if err := uc.tokenRepo.Revoke(ctx, claims.TokenID); err != nil {
@@ -2405,6 +2417,8 @@ import (
 
 	"gorm.io/gorm"
 
+	"go.uber.org/zap"
+
 	"github.com/johnquangdev/laverte-home/config"
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/util"
@@ -2467,7 +2481,7 @@ func TestRefreshTokenReuseRevokesFamily(t *testing.T) {
 	cfg := config.Config{JWTAccessSecret: "a", JWTRefreshSecret: "r", JWTAccessTTLMinutes: 15, JWTRefreshTTLDays: 30}
 	userRepo := &fakeUserRepo{users: map[uint]*model.User{1: {ID: 1, Email: "a@b.com"}}}
 	tokenRepo := newFakeTokenRepo()
-	uc := New(userRepo, tokenRepo, nil, nil, cfg).(*UseCase)
+	uc := New(userRepo, tokenRepo, nil, nil, cfg, zap.NewNop()).(*UseCase)
 
 	session, err := uc.issueTokenPair(context.Background(), userRepo.users[1], "fam-1")
 	if err != nil {
@@ -3013,7 +3027,7 @@ func main() {
 	tokenStore := tokenstore.NewRedis(cfg)
 	limiter := ratelimit.NewRedis(cfg)
 
-	authUC := authuc.New(users, tokens, oauthSvc, tokenStore, *cfg)
+	authUC := authuc.New(users, tokens, oauthSvc, tokenStore, *cfg, log)
 	adminUC := adminuc.New(users)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
