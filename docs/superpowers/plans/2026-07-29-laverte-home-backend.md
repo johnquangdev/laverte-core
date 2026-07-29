@@ -369,6 +369,9 @@ func NewServer(cfg config.Config, log *zap.Logger) *Server {
 	e.HideBanner = true
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestID())
+	// The guest booking route is reachable without authentication, so cap the body
+	// before any handler allocates from it.
+	e.Use(middleware.BodyLimit("64K"))
 	e.Use(middleware.SecureWithConfig(middleware.SecureConfig{
 		XSSProtection: "1; mode=block", ContentTypeNosniff: "nosniff",
 		XFrameOptions: "DENY", ReferrerPolicy: "no-referrer",
@@ -2922,6 +2925,9 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	e.Validator = &requestValidator{v: validator.New()}
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestID())
+	// The guest booking route is reachable without authentication, so cap the body
+	// before any handler allocates from it.
+	e.Use(middleware.BodyLimit("64K"))
 	e.Use(middleware.SecureWithConfig(middleware.SecureConfig{
 		XSSProtection: "1; mode=block", ContentTypeNosniff: "nosniff",
 		XFrameOptions: "DENY", ReferrerPolicy: "no-referrer",
@@ -3215,7 +3221,10 @@ git commit -m "feat: auth usecase (Google OAuth+JWT), admin roster, wire server"
 ```go
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	HomeCategoryHome = "home"
@@ -3238,6 +3247,30 @@ func (Home) TableName() string { return "homes" }
 
 func IsValidHomeCategory(c string) bool {
 	return c == HomeCategoryHome || c == HomeCategoryNest
+}
+
+// NormalizeVNPhone reduces a Vietnamese number to one canonical 84XXXXXXXXX form.
+//
+// Without it "0900000001", "+84900000001" and "84900000001" are three different
+// strings, which means three different per-phone rate-limit keys and three separate
+// pending-booking lookups — so one caller gets three times the intended quota and can
+// hold three slots. Everything that keys on a phone must key on this.
+func NormalizeVNPhone(phone string) string {
+	var digits []rune
+	for _, r := range phone {
+		if r >= '0' && r <= '9' {
+			digits = append(digits, r)
+		}
+	}
+	d := string(digits)
+	switch {
+	case strings.HasPrefix(d, "0"):
+		return "84" + d[1:]
+	case strings.HasPrefix(d, "84"):
+		return d
+	default:
+		return d
+	}
 }
 ```
 
@@ -6933,7 +6966,7 @@ git commit -m "feat: Payment model, once-only settlement guard, SePay VietQR cli
 - Consumes: `bookingrepo.IRepository` + `bookingrepo.ErrSlotConflict` (Task 9); `homerepo.IRepository` (Task 7); `blockedslotrepo.IRepository` (Task 10); `paymentrepo.IRepository` (Task 11); `pricinguc.IUseCase.Compute` (Task 8); `checkout.IPaymentProvider` + `checkout.CreateQRRequest`/`QRResult` (Task 11, constructed in `main` as `checkout.NewSePay(*cfg)` — the constructor takes `config.Config` by value); `jwtmw.RateLimitByIP`/`RateLimitByPhone` (Task 5); `cfg.BookingPendingTTLMinutes`, `cfg.RateLimitBookingPerMinIP`, `cfg.RateLimitBookingPerMinPhone` (Task 1).
 - Produces: `payload.CreateBookingRequest`; `presenter.BookingResponse` + `presenter.ToBookingResponse(b *model.Booking, qrContent string) BookingResponse`.
 - Produces: `bookinguc.IUseCase` — **declares only `Create` in this task; later tasks (guest booking lookup, admin walk-in/cancel/lock-code ops) add methods to this same interface, so do not treat it as closed.**
-- Produces: `bookinguc.New(bookingRepo, homeRepo, blockedSlotRepo, paymentRepo, pricingUC, payment, cfg) IUseCase`.
+- Produces: `bookinguc.New(bookingRepo, homeRepo, blockedSlotRepo, paymentRepo, pricingUC, payment, cfg, log) IUseCase`.
 - Produces: `bookinghttp.Init(g *echo.Group, uc bookinguc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc, phoneLimit echo.MiddlewareFunc)` — mounts `POST /api/v1/bookings` with no JWT.
 
 - [ ] **Step 1: Write `payload/booking.go`**
@@ -6945,8 +6978,8 @@ import "time"
 
 type CreateBookingRequest struct {
 	HomeID        uint      `json:"home_id" validate:"required"`
-	CustomerName  string    `json:"customer_name" validate:"required"`
-	CustomerPhone string    `json:"customer_phone" validate:"required"`
+	CustomerName  string    `json:"customer_name" validate:"required,max=100"`
+	CustomerPhone string    `json:"customer_phone" validate:"required,max=20"`
 	StartTime     time.Time `json:"start_time" validate:"required"`
 	EndTime       time.Time `json:"end_time" validate:"required"`
 	BookingType   string    `json:"booking_type" validate:"required,oneof=hourly overnight day"`
@@ -7014,6 +7047,8 @@ type IUseCase interface {
 package booking
 
 import (
+	"go.uber.org/zap"
+
 	"github.com/johnquangdev/laverte-home/config"
 	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
 	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
@@ -7031,6 +7066,7 @@ type UseCase struct {
 	pricingUC       pricinguc.IUseCase
 	payment         checkout.IPaymentProvider
 	cfg             config.Config
+	log             *zap.Logger
 }
 
 func New(
@@ -7041,6 +7077,7 @@ func New(
 	pricingUC pricinguc.IUseCase,
 	payment checkout.IPaymentProvider,
 	cfg config.Config,
+	log *zap.Logger,
 ) IUseCase {
 	return &UseCase{
 		bookingRepo:     bookingRepo,
@@ -7050,6 +7087,7 @@ func New(
 		pricingUC:       pricingUC,
 		payment:         payment,
 		cfg:             cfg,
+		log:             log,
 	}
 }
 ```
@@ -7074,6 +7112,18 @@ import (
 	"github.com/johnquangdev/laverte-home/util/checkout"
 )
 
+// releaseBooking frees a hold's slot immediately by moving it out of the statuses the
+// exclusion constraint covers. Best-effort by design: the caller is already returning
+// an error, and the expiry sweep would collect the row eventually — this only stops the
+// window being unbookable until then.
+func (uc *UseCase) releaseBooking(ctx context.Context, b *model.Booking) {
+	b.Status = model.BookingStatusExpired
+	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+		uc.log.Error("could not release a booking hold after a failed create",
+			zap.Uint("booking_id", b.ID), zap.Error(err))
+	}
+}
+
 func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest) (*presenter.BookingResponse, error) {
 	if !req.EndTime.After(req.StartTime) {
 		return nil, apperr.Validation("end_time phai sau start_time")
@@ -7081,19 +7131,44 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 	if !model.IsValidBookingType(req.BookingType) {
 		return nil, apperr.Validation("booking_type phai la 'hourly', 'overnight' hoac 'day'")
 	}
+	// One canonical spelling for the lookup, the stored row and the rate-limit key,
+	// so the same number cannot hold several slots under different formats.
+	phone := model.NormalizeVNPhone(req.CustomerPhone)
+	if len(phone) < 10 {
+		return nil, apperr.Validation("so dien thoai khong hop le")
+	}
 
-	// Re-use check runs before pricing, slot checks and any provider call: a
-	// phone still holding an un-expired pending booking gets its existing QR
-	// back, so one caller cannot mint an unbounded pile of unpaid QR codes.
-	existing, err := uc.bookingRepo.GetPendingByPhone(ctx, req.CustomerPhone)
+	// Re-use check runs before pricing, slot checks and any provider call: a phone
+	// still holding an un-expired pending booking must not mint a second hold or a
+	// second QR.
+	//
+	// It only hands the booking back when the request MATCHES that hold — same home,
+	// same window — which is a guest retrying and re-reading their own QR. Anyone can
+	// put any phone number in this body, and this endpoint is public, so returning a
+	// stored booking for a phone the caller merely typed would disclose a stranger's
+	// name, which property they are staying at, when, and a payable QR. A
+	// non-matching request is refused instead, saying only that the phone already has
+	// a pending booking.
+	existing, err := uc.bookingRepo.GetPendingByPhone(ctx, phone)
 	switch {
 	case err == nil:
+		if existing.HomeID != req.HomeID ||
+			!existing.StartTime.Equal(req.StartTime) ||
+			!existing.EndTime.Equal(req.EndTime) {
+			return nil, apperr.Conflict(nil, "so dien thoai nay dang co mot booking cho thanh toan — vui long hoan tat hoac doi den khi no het han")
+		}
 		pay, payErr := uc.paymentRepo.GetByBookingID(ctx, existing.ID)
-		if payErr != nil {
+		if payErr == nil && pay.QRContent != "" {
+			resp := presenter.ToBookingResponse(existing, pay.QRContent)
+			return &resp, nil
+		}
+		if payErr != nil && !errors.Is(payErr, gorm.ErrRecordNotFound) {
 			return nil, apperr.Internal(payErr)
 		}
-		resp := presenter.ToBookingResponse(existing, pay.QRContent)
-		return &resp, nil
+		// A hold with no usable payment row is an orphan left by a create that died
+		// after the booking row committed. Release it rather than answering 500 for
+		// the rest of its TTL, and fall through to build a fresh one.
+		uc.releaseBooking(ctx, existing)
 	case !errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, apperr.Internal(err)
 	}
@@ -7141,9 +7216,22 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 		return nil, apperr.Internal(err)
 	}
 
+	// From here the row is committed and already occupying the slot, so anything that
+	// fails below must release it. Leaving it would make that window unbookable for
+	// the whole pending TTL for a booking nobody can pay, and the guest's own retry
+	// would keep finding it.
+	release := func(cause error) error {
+		uc.releaseBooking(ctx, b)
+		return cause
+	}
+
 	qr, err := uc.payment.CreateQR(ctx, checkout.CreateQRRequest{BookingID: b.ID, AmountVND: price})
 	if err != nil {
-		return nil, apperr.Internal(err)
+		return nil, release(apperr.Internal(err))
+	}
+	// A blank QR would reach the guest as a 200 with nothing to pay against.
+	if qr.QRContent == "" {
+		return nil, release(apperr.Internal(errors.New("checkout: provider returned an empty QR")))
 	}
 
 	pay := &model.Payment{
@@ -7154,7 +7242,7 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 		QRContent: qr.QRContent,
 	}
 	if err := uc.paymentRepo.Create(ctx, pay); err != nil {
-		return nil, apperr.Internal(err)
+		return nil, release(apperr.Internal(err))
 	}
 
 	b.PaymentID = &pay.ID
@@ -7584,7 +7672,9 @@ func bindBookingRequest(handleErr HandleErrFunc) echo.MiddlewareFunc {
 				return handleErr(c, err)
 			}
 			c.Set("booking_request", req)
-			c.Set("customer_phone", req.CustomerPhone)
+			// Canonical form, so "0900000001" and "+84900000001" share one quota
+			// instead of getting one each.
+			c.Set("customer_phone", model.NormalizeVNPhone(req.CustomerPhone))
 			return next(c)
 		}
 	}
@@ -7657,7 +7747,7 @@ Add after the existing repo/usecase construction (`homes`, `pricingRules`, `pric
 	payments := paymentrepo.NewPG(dbFactory)
 
 	sepay := checkout.NewSePay(*cfg)
-	bookingUC := bookinguc.New(bookings, homes, blockedSlots, payments, pricingUC, sepay, *cfg)
+	bookingUC := bookinguc.New(bookings, homes, blockedSlots, payments, pricingUC, sepay, *cfg, log)
 ```
 
 and add `BookingUC: bookingUC,` to the `httpserver.Deps{...}` literal.
@@ -9333,8 +9423,8 @@ import "time"
 
 type CreateWalkInBookingRequest struct {
 	HomeID        uint      `json:"home_id" validate:"required"`
-	CustomerName  string    `json:"customer_name" validate:"required"`
-	CustomerPhone string    `json:"customer_phone" validate:"required"`
+	CustomerName  string    `json:"customer_name" validate:"required,max=100"`
+	CustomerPhone string    `json:"customer_phone" validate:"required,max=20"`
 	StartTime     time.Time `json:"start_time" validate:"required"`
 	EndTime       time.Time `json:"end_time" validate:"required"`
 	BookingType   string    `json:"booking_type" validate:"required"`
@@ -9492,6 +9582,12 @@ func (uc *UseCase) CreateWalkIn(ctx context.Context, req payload.CreateWalkInBoo
 	}
 	if !model.IsValidBookingType(req.BookingType) {
 		return nil, apperr.Validation("booking_type phai la 'hourly', 'overnight' hoac 'day'")
+	}
+	// One canonical spelling for the lookup, the stored row and the rate-limit key,
+	// so the same number cannot hold several slots under different formats.
+	phone := model.NormalizeVNPhone(req.CustomerPhone)
+	if len(phone) < 10 {
+		return nil, apperr.Validation("so dien thoai khong hop le")
 	}
 
 	home, err := uc.homeRepo.GetByID(ctx, req.HomeID)
