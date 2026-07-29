@@ -14,11 +14,13 @@ import (
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
 	"github.com/johnquangdev/laverte-home/migrations"
 	homerepo "github.com/johnquangdev/laverte-home/repository/home"
+	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricingrule"
 	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refreshtoken"
 	userrepo "github.com/johnquangdev/laverte-home/repository/user"
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
+	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-home/util/oauth"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
 	"github.com/johnquangdev/laverte-home/util/tokenstore"
@@ -39,6 +41,8 @@ func main() {
 	users := userrepo.NewPG(dbFactory)
 	tokens := refreshtokenrepo.NewPG(dbFactory)
 	homes := homerepo.NewPG(dbFactory)
+	// pricingRules also backs the booking usecase's pricinguc.New(pricingRules).
+	pricingRules := pricingrulerepo.NewPG(dbFactory)
 
 	oauthSvc := oauth.NewGoogle(cfg)
 	tokenStore := tokenstore.NewRedis(cfg)
@@ -47,6 +51,7 @@ func main() {
 	authUC := authuc.New(users, tokens, oauthSvc, tokenStore, *cfg, log)
 	adminUC := adminuc.New(users)
 	homeAdminUC := homeadminuc.New(homes)
+	pricingAdminUC := pricingadminuc.New(pricingRules)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
 		u, err := users.GetByID(ctx, userID)
@@ -63,6 +68,7 @@ func main() {
 		AdminUC:           adminUC,
 		AdminRoleResolver: adminRoleResolver,
 		HomeAdminUC:       homeAdminUC,
+		PricingAdminUC:    pricingAdminUC,
 	})
 	log.Info("starting server", zap.String("port", cfg.Port))
 	if err := srv.Start(); err != nil {

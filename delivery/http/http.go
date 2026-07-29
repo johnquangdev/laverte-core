@@ -16,6 +16,7 @@ import (
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
+	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
 	"github.com/johnquangdev/laverte-home/util/tokenstore"
 )
@@ -44,6 +45,7 @@ type Deps struct {
 	AdminUC           adminuc.IUseCase
 	AdminRoleResolver jwtmw.AdminRoleResolver
 	HomeAdminUC       homeadminuc.IUseCase
+	PricingAdminUC    pricingadminuc.IUseCase
 }
 
 func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
@@ -93,6 +95,7 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	adminGroup := authed.Group("/admin", requireAdmin)
 	adminhttp.Init(adminGroup, deps.AdminUC, handleErr, handleOK, jwtmw.RequireSuperAdmin(cfg))
 	adminhttp.InitHomes(adminGroup, deps.HomeAdminUC, handleErr, handleOK)
+	adminhttp.InitPricingRules(adminGroup, deps.PricingAdminUC, handleErr, handleOK)
 
 	return &Server{echo: e, cfg: cfg, log: log}
 }

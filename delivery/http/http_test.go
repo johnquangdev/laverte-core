@@ -46,6 +46,18 @@ func (stubHomeAdminUC) Update(context.Context, uint, payload.UpdateHomeRequest) 
 }
 func (stubHomeAdminUC) List(context.Context) ([]presenter.HomeResponse, error) { return nil, nil }
 
+type stubPricingAdminUC struct{}
+
+func (stubPricingAdminUC) Create(context.Context, payload.UpsertPricingRuleRequest) (*presenter.PricingRuleResponse, error) {
+	return nil, nil
+}
+func (stubPricingAdminUC) Supersede(context.Context, uint, payload.UpsertPricingRuleRequest) (*presenter.PricingRuleResponse, error) {
+	return nil, nil
+}
+func (stubPricingAdminUC) ListByCategory(context.Context, string) ([]presenter.PricingRuleResponse, error) {
+	return nil, nil
+}
+
 // stubTokenStore reports nothing revoked, so router tests need no Redis.
 type stubTokenStore struct{}
 
@@ -64,6 +76,7 @@ func newTestServer() *Server {
 		AdminUC:           stubAdminUC{},
 		AdminRoleResolver: jwtmw.AdminRoleResolverFunc(func(context.Context, uint) (string, error) { return "", nil }),
 		HomeAdminUC:       stubHomeAdminUC{},
+		PricingAdminUC:    stubPricingAdminUC{},
 	})
 }
 
