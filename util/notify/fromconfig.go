@@ -21,8 +21,11 @@ const znsTimeout = 10 * time.Second
 // behind apparently-working behaviour, and the lock-code flow depends on the admin
 // alert arriving. Returning the no-op makes the gap visible in the boot log instead.
 func FromConfig(cfg *config.Config, log *zap.Logger) INotifier {
-	znsReady := cfg.ZNSAccessToken != ""
-	smtpReady := cfg.SMTPHost != ""
+	znsReady := cfg.ZNSAccessToken != "" && cfg.ZNSBookingConfirmedTemplateID != "" && cfg.ZNSLockCodeTemplateID != ""
+	// A host with nowhere to send is not ready: every admin alert would fail at the
+	// recipient guard while guest messages went out normally, which is the
+	// half-working state this whole check exists to prevent.
+	smtpReady := cfg.SMTPHost != "" && cfg.AdminAlertEmail != ""
 	if znsReady && smtpReady {
 		return NewComposite(NewZNS(cfg, &http.Client{Timeout: znsTimeout}), NewSMTPAdmin(cfg))
 	}

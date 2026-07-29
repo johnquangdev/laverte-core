@@ -9,22 +9,35 @@ import (
 )
 
 func TestFromConfig(t *testing.T) {
+	// base is a fully-configured environment; each case knocks out exactly one
+	// field so a failure pinpoints which readiness clause let it through.
+	base := config.Config{
+		ZNSAccessToken:                "tok",
+		ZNSBookingConfirmedTemplateID: "tpl-confirmed",
+		ZNSLockCodeTemplateID:         "tpl-lock",
+		SMTPHost:                      "smtp.example.com",
+		AdminAlertEmail:               "admin@example.com",
+	}
+
 	cases := []struct {
 		name          string
-		znsToken      string
-		smtpHost      string
+		mutate        func(cfg *config.Config)
 		wantComposite bool
 	}{
-		{name: "both configured", znsToken: "tok", smtpHost: "smtp.example.com", wantComposite: true},
-		{name: "only ZNS configured", znsToken: "tok", smtpHost: "", wantComposite: false},
-		{name: "only SMTP configured", znsToken: "", smtpHost: "smtp.example.com", wantComposite: false},
-		{name: "neither configured", znsToken: "", smtpHost: "", wantComposite: false},
+		{name: "both configured", mutate: func(*config.Config) {}, wantComposite: true},
+		{name: "only ZNS configured (no SMTP host)", mutate: func(cfg *config.Config) { cfg.SMTPHost = "" }, wantComposite: false},
+		{name: "only SMTP configured (no ZNS token)", mutate: func(cfg *config.Config) { cfg.ZNSAccessToken = "" }, wantComposite: false},
+		{name: "neither configured", mutate: func(cfg *config.Config) { cfg.ZNSAccessToken = ""; cfg.SMTPHost = "" }, wantComposite: false},
+		{name: "SMTP host set but no admin alert email", mutate: func(cfg *config.Config) { cfg.AdminAlertEmail = "" }, wantComposite: false},
+		{name: "ZNS token set but confirmed template id empty", mutate: func(cfg *config.Config) { cfg.ZNSBookingConfirmedTemplateID = "" }, wantComposite: false},
+		{name: "ZNS token set but lock code template id empty", mutate: func(cfg *config.Config) { cfg.ZNSLockCodeTemplateID = "" }, wantComposite: false},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := &config.Config{ZNSAccessToken: c.znsToken, SMTPHost: c.smtpHost}
-			n := FromConfig(cfg, zap.NewNop())
+			cfg := base
+			c.mutate(&cfg)
+			n := FromConfig(&cfg, zap.NewNop())
 
 			_, isNoop := n.(noopNotifier)
 			if c.wantComposite && isNoop {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -16,6 +17,9 @@ import (
 // vnTimeLayout is the day-first format Vietnamese customers and admins read;
 // also used by smtp_admin.go.
 const vnTimeLayout = "02/01/2006 15:04"
+
+// znsMaxResponseBytes caps the provider response before decoding.
+const znsMaxResponseBytes = 64 << 10
 
 // ZNSNotifier is the customer channel: Zalo delivers by phone number, so the
 // guest needs neither an account on this system nor an app install.
@@ -80,7 +84,10 @@ func (z *ZNSNotifier) send(ctx context.Context, phone, templateID string, data m
 	// rejected before it reaches Zalo rather than sent as a literal "" phone.
 	normalizedPhone := model.NormalizeVNPhone(phone)
 	if normalizedPhone == "" {
-		return fmt.Errorf("notify/zns: customer phone %q does not normalize to a Vietnamese number", phone)
+		// No phone in the message: the caller logs this error, so the number would
+		// land in the log store. The booking id the caller already logs is enough
+		// to find the row.
+		return errors.New("notify/zns: customer phone does not normalize to a Vietnamese number")
 	}
 
 	body, err := json.Marshal(znsRequest{
@@ -106,7 +113,9 @@ func (z *ZNSNotifier) send(ctx context.Context, phone, templateID string, data m
 	defer func() { _ = resp.Body.Close() }()
 
 	var out znsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	// Cap the body before decoding: this is a network boundary, and the response is a
+	// handful of fields.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, znsMaxResponseBytes)).Decode(&out); err != nil {
 		return fmt.Errorf("notify/zns: decode response: %w", err)
 	}
 	// ZNS answers HTTP 200 even for rejected sends and reports the real outcome

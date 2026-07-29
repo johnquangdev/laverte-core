@@ -141,6 +141,10 @@ func TestZNSUnnormalizablePhoneFailsWithoutCallingZNS(t *testing.T) {
 	if err == nil {
 		t.Fatal("BookingConfirmed() = nil error, want error for an unnormalizable phone")
 	}
+	// The caller logs this error verbatim, so the raw phone must not ride along in it.
+	if strings.Contains(err.Error(), b.CustomerPhone) {
+		t.Errorf("error = %v, must not contain the raw customer phone", err)
+	}
 
 	select {
 	case <-captured:
