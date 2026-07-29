@@ -26,4 +26,11 @@ type IRepository interface {
 	// ListReadyToSendLockCode returns confirmed bookings whose start_time has
 	// already passed, that have a door_lock_code set, and haven't been sent yet.
 	ListReadyToSendLockCode(ctx context.Context, now time.Time) ([]*model.Booking, error)
+	// MarkLockCodeAlertSent and MarkLockCodeSent write one column each, unlike
+	// Update's Save() which rewrites every column from an in-memory snapshot. The
+	// lock-code sweeps run on a timer while an admin may be cancelling the same
+	// booking; a read-modify-Save from either side would silently discard the
+	// other's change.
+	MarkLockCodeAlertSent(ctx context.Context, id uint, at time.Time) error
+	MarkLockCodeSent(ctx context.Context, id uint, at time.Time) error
 }

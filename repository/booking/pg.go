@@ -92,3 +92,15 @@ func (r *pgRepository) ListReadyToSendLockCode(ctx context.Context, now time.Tim
 		Find(&out).Error
 	return out, err
 }
+
+func (r *pgRepository) MarkLockCodeAlertSent(ctx context.Context, id uint, at time.Time) error {
+	return r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ?", id).
+		Update("lock_code_alert_sent_at", at).Error
+}
+
+func (r *pgRepository) MarkLockCodeSent(ctx context.Context, id uint, at time.Time) error {
+	return r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ?", id).
+		Update("lock_code_sent_at", at).Error
+}

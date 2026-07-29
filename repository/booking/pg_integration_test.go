@@ -51,6 +51,12 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	return gormDB
 }
 
+// expiresIn builds the *time.Time the pending-expiry CHECK requires.
+func expiresIn(d time.Duration) *time.Time {
+	t := time.Now().Add(d)
+	return &t
+}
+
 func TestCreateRejectsOverlappingBookingForSameHome(t *testing.T) {
 	db := setupTestDB(t)
 	getDB := func(context.Context) *gorm.DB { return db }
@@ -68,7 +74,7 @@ func TestCreateRejectsOverlappingBookingForSameHome(t *testing.T) {
 	first := &model.Booking{
 		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000001",
 		StartTime: start, EndTime: end, BookingType: model.BookingTypeHourly,
-		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: expiresIn(time.Hour),
 	}
 	if err := repo.Create(ctx, first); err != nil {
 		t.Fatalf("first Create() error = %v", err)
@@ -78,6 +84,7 @@ func TestCreateRejectsOverlappingBookingForSameHome(t *testing.T) {
 		HomeID: home.ID, CustomerName: "B", CustomerPhone: "0900000002",
 		StartTime: start.Add(30 * time.Minute), EndTime: end.Add(30 * time.Minute),
 		BookingType: model.BookingTypeHourly, ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ExpiresAt: expiresIn(time.Hour),
 	}
 	if err := repo.Create(ctx, overlapping); !errors.Is(err, ErrSlotConflict) {
 		t.Fatalf("second Create() error = %v, want ErrSlotConflict", err)
@@ -99,7 +106,7 @@ func TestCreateAllowsNonOverlappingBookingForSameHome(t *testing.T) {
 	first := &model.Booking{
 		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000001",
 		StartTime: start, EndTime: start.Add(time.Hour), BookingType: model.BookingTypeHourly,
-		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: expiresIn(time.Hour),
 	}
 	if err := repo.Create(ctx, first); err != nil {
 		t.Fatalf("first Create() error = %v", err)
@@ -109,6 +116,7 @@ func TestCreateAllowsNonOverlappingBookingForSameHome(t *testing.T) {
 		HomeID: home.ID, CustomerName: "B", CustomerPhone: "0900000002",
 		StartTime: start.Add(time.Hour), EndTime: start.Add(2 * time.Hour),
 		BookingType: model.BookingTypeHourly, ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ExpiresAt: expiresIn(time.Hour),
 	}
 	if err := repo.Create(ctx, after); err != nil {
 		t.Fatalf("adjacent (non-overlapping) Create() error = %v, want nil", err)
@@ -139,7 +147,7 @@ func TestCreateAllowsOverlapWhenFirstIsCancelled(t *testing.T) {
 	overlapping := &model.Booking{
 		HomeID: home.ID, CustomerName: "B", CustomerPhone: "0900000002",
 		StartTime: start, EndTime: start.Add(2 * time.Hour), BookingType: model.BookingTypeHourly,
-		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: expiresIn(time.Hour),
 	}
 	if err := repo.Create(ctx, overlapping); err != nil {
 		t.Fatalf("Create() overlapping a cancelled booking error = %v, want nil", err)
@@ -174,9 +182,72 @@ func TestCreateAllowsOverlapWhenFirstIsExpired(t *testing.T) {
 	overlapping := &model.Booking{
 		HomeID: home.ID, CustomerName: "B", CustomerPhone: "0900000002",
 		StartTime: start, EndTime: start.Add(2 * time.Hour), BookingType: model.BookingTypeHourly,
-		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: expiresIn(time.Hour),
 	}
 	if err := repo.Create(ctx, overlapping); err != nil {
 		t.Fatalf("Create() overlapping an expired booking error = %v, want nil", err)
+	}
+}
+
+// TestCreateRejectsZeroAndNegativeDuration proves the bookings_time_order CHECK:
+// tstzrange(start, start) is an EMPTY range and overlaps nothing, so without this
+// CHECK the exclusion constraint would give a zero-duration booking no protection
+// at all, and Postgres itself would raise an unmappable driver error for end <
+// start rather than a constraint the repository can translate.
+func TestCreateRejectsZeroAndNegativeDuration(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Test Home 5", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+
+	start := time.Now().Add(time.Hour).Truncate(time.Second)
+
+	zeroDuration := &model.Booking{
+		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000001",
+		StartTime: start, EndTime: start, BookingType: model.BookingTypeHourly,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: expiresIn(time.Hour),
+	}
+	if err := repo.Create(ctx, zeroDuration); err == nil {
+		t.Fatal("Create() with start == end error = nil, want a rejection")
+	}
+
+	negativeDuration := &model.Booking{
+		HomeID: home.ID, CustomerName: "B", CustomerPhone: "0900000002",
+		StartTime: start, EndTime: start.Add(-time.Hour), BookingType: model.BookingTypeHourly,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: expiresIn(time.Hour),
+	}
+	if err := repo.Create(ctx, negativeDuration); err == nil {
+		t.Fatal("Create() with end before start error = nil, want a rejection")
+	}
+}
+
+// TestCreateRejectsPendingWithoutExpiry proves the bookings_pending_has_expiry
+// CHECK: GetPendingByPhone filters on expires_at > now(), and SQL treats
+// NULL > now() as unknown rather than true, so a pending_payment row with no
+// expiry would be invisible to that anti-spam gate and defeat it silently.
+func TestCreateRejectsPendingWithoutExpiry(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Test Home 6", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+
+	start := time.Now().Add(time.Hour).Truncate(time.Second)
+	noExpiry := &model.Booking{
+		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000001",
+		StartTime: start, EndTime: start.Add(time.Hour), BookingType: model.BookingTypeHourly,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: nil,
+	}
+	if err := repo.Create(ctx, noExpiry); err == nil {
+		t.Fatal("Create() pending_payment with nil ExpiresAt error = nil, want a rejection")
 	}
 }
