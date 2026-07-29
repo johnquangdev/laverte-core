@@ -20,13 +20,28 @@ import (
 type fakeBookingRepo struct {
 	booking     *model.Booking
 	updateCalls int
+	getCalls    int
+	// getErr, if set, makes every GetByID fail with it instead of the normal
+	// lookup — used to prove a DB outage surfaces as 500, not 404.
+	getErr error
+	// confirmOnGetCall, if non-zero, flips booking.Status to confirmed on the
+	// matching 1-indexed GetByID call, simulating a concurrent delivery's
+	// Update landing between this delivery's first read and its recovery re-read.
+	confirmOnGetCall int
 }
 
 func (f *fakeBookingRepo) Create(context.Context, *model.Booking) error { return nil }
 
 func (f *fakeBookingRepo) GetByID(_ context.Context, id uint) (*model.Booking, error) {
+	f.getCalls++
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	if f.booking == nil || f.booking.ID != id {
 		return nil, gorm.ErrRecordNotFound
+	}
+	if f.confirmOnGetCall != 0 && f.getCalls == f.confirmOnGetCall {
+		f.booking.Status = model.BookingStatusConfirmed
 	}
 	return f.booking, nil
 }
@@ -76,6 +91,9 @@ type fakePaymentRepo struct {
 	markOK    bool
 	markErr   error
 	markCalls int
+	// getErr, if set, makes GetByBookingID fail with it instead of the normal
+	// lookup — used to prove a DB outage surfaces as 500, not 404.
+	getErr error
 }
 
 func (f *fakePaymentRepo) Create(context.Context, *model.Payment) error { return nil }
@@ -88,6 +106,9 @@ func (f *fakePaymentRepo) GetByID(context.Context, uint) (*model.Payment, error)
 }
 
 func (f *fakePaymentRepo) GetByBookingID(context.Context, uint) (*model.Payment, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	if f.payment == nil {
 		return nil, gorm.ErrRecordNotFound
 	}
@@ -278,21 +299,107 @@ func TestHandleSePayWebhookIsIdempotentForConfirmedBooking(t *testing.T) {
 	}
 }
 
-func TestHandleSePayWebhookStopsWhenPaymentAlreadyPaid(t *testing.T) {
+// TestHandleSePayWebhookRecoversStrandedSettlement covers the case where a
+// prior delivery's MarkPaidIfPending succeeded but its bookingRepo.Update
+// failed before the process could confirm the booking: the payment is paid,
+// the booking is still pending_payment, and nothing else will ever retry
+// this except SePay's own redelivery. This delivery must finish the job —
+// confirm the booking and notify — rather than repeating the old "someone
+// else handled it" no-op, which left the booking stranded forever.
+func TestHandleSePayWebhookRecoversStrandedSettlement(t *testing.T) {
 	h := newHarness(pendingBooking(), paidEvent(), nil)
-	h.payments.markOK = false
+	h.payments.markOK = false // this delivery's own MarkPaidIfPending call also reports "not pending"
 
 	if err := h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{}); err != nil {
 		t.Fatalf("HandleSePayWebhook() error = %v, want nil", err)
 	}
-	if h.bookings.booking.Status != model.BookingStatusPendingPayment {
-		t.Errorf("Status = %q, want it untouched when the payment was already settled", h.bookings.booking.Status)
+	if h.bookings.booking.Status != model.BookingStatusConfirmed {
+		t.Errorf("Status = %q, want confirmed (recovered)", h.bookings.booking.Status)
+	}
+	// One Update to confirm the status, one more from pushCalendarEvent
+	// persisting the calendar event id — both are expected on the happy path.
+	if h.bookings.updateCalls != 2 {
+		t.Errorf("bookingRepo.Update calls = %d, want 2", h.bookings.updateCalls)
+	}
+	if h.notifier.confirmedCalls != 1 {
+		t.Errorf("BookingConfirmed calls = %d, want 1", h.notifier.confirmedCalls)
+	}
+}
+
+// TestHandleSePayWebhookConcurrentRaceLoserIsANoOp covers the genuine
+// concurrent race the recovery path in the test above must not disturb: a
+// second delivery's MarkPaidIfPending reports "not pending" because a
+// different delivery is settling the same payment right now, and by the
+// time this delivery re-reads the booking, that other delivery has already
+// confirmed it. The loser must do nothing — no second Update, no second
+// notification.
+func TestHandleSePayWebhookConcurrentRaceLoserIsANoOp(t *testing.T) {
+	h := newHarness(pendingBooking(), paidEvent(), nil)
+	h.payments.markOK = false
+	// The 2nd GetByID call is the recovery re-read; flip to confirmed there to
+	// simulate the winning delivery's Update landing in between.
+	h.bookings.confirmOnGetCall = 2
+
+	if err := h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{}); err != nil {
+		t.Fatalf("HandleSePayWebhook() error = %v, want nil", err)
+	}
+	if h.bookings.booking.Status != model.BookingStatusConfirmed {
+		t.Errorf("Status = %q, want confirmed (by the winner)", h.bookings.booking.Status)
 	}
 	if h.bookings.updateCalls != 0 {
-		t.Errorf("bookingRepo.Update calls = %d, want 0", h.bookings.updateCalls)
+		t.Errorf("bookingRepo.Update calls = %d, want 0 — the loser must not touch it again", h.bookings.updateCalls)
 	}
 	if h.notifier.confirmedCalls != 0 {
-		t.Errorf("BookingConfirmed calls = %d, want 0", h.notifier.confirmedCalls)
+		t.Errorf("BookingConfirmed calls = %d, want 0 — the loser must not notify again", h.notifier.confirmedCalls)
+	}
+}
+
+// TestHandleSePayWebhookRejectsBadSignature proves the authentication
+// boundary: a VerifyWebhook failure that is not the connectivity-ping
+// sentinel must be rejected as unauthorized, not silently acknowledged.
+func TestHandleSePayWebhookRejectsBadSignature(t *testing.T) {
+	h := newHarness(pendingBooking(), nil, errors.New("checkout: signature mismatch"))
+
+	err := h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{})
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeUnauthorized {
+		t.Errorf("error = %v, want apperr with Code %q", err, apperr.CodeUnauthorized)
+	}
+	if h.payments.markCalls != 0 {
+		t.Errorf("MarkPaidIfPending calls = %d, want 0", h.payments.markCalls)
+	}
+}
+
+// TestHandleSePayWebhookBookingLookupOutageIsInternal proves a database
+// outage on the booking lookup surfaces as 500, not as the 404 a guest
+// would get for a booking id that genuinely doesn't exist.
+func TestHandleSePayWebhookBookingLookupOutageIsInternal(t *testing.T) {
+	h := newHarness(pendingBooking(), paidEvent(), nil)
+	h.bookings.getErr = errors.New("connection refused")
+
+	err := h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{})
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeInternal {
+		t.Errorf("error = %v, want apperr with Code %q", err, apperr.CodeInternal)
+	}
+	if e != nil && e.HTTPCode != http.StatusInternalServerError {
+		t.Errorf("HTTPCode = %d, want %d", e.HTTPCode, http.StatusInternalServerError)
+	}
+}
+
+// TestHandleSePayWebhookPaymentLookupOutageIsInternal is the same proof as
+// above for the payment lookup.
+func TestHandleSePayWebhookPaymentLookupOutageIsInternal(t *testing.T) {
+	h := newHarness(pendingBooking(), paidEvent(), nil)
+	h.payments.getErr = errors.New("connection refused")
+
+	err := h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{})
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeInternal {
+		t.Errorf("error = %v, want apperr with Code %q", err, apperr.CodeInternal)
+	}
+	if e != nil && e.HTTPCode != http.StatusInternalServerError {
+		t.Errorf("HTTPCode = %d, want %d", e.HTTPCode, http.StatusInternalServerError)
 	}
 }
 
