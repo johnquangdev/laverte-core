@@ -3,6 +3,8 @@ package util
 import (
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestGenerateAndParseToken(t *testing.T) {
@@ -32,5 +34,20 @@ func TestParseTokenRejectsExpired(t *testing.T) {
 	tokenStr, _ := GenerateToken("secret", Claims{UserID: 1}, -time.Minute)
 	if _, err := ParseToken("secret", tokenStr); err == nil {
 		t.Error("ParseToken() with expired token = nil error, want error")
+	}
+}
+
+// ParseToken must reject a token whose header claims a non-HMAC algorithm.
+// Without the signing-method check, an attacker could present an unsigned
+// (alg=none) token and have its claims trusted.
+func TestParseTokenRejectsNonHMACAlgorithm(t *testing.T) {
+	claims := Claims{UserID: 99, TokenID: "forged"}
+	unsigned, err := jwt.NewWithClaims(jwt.SigningMethodNone, claims).SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatalf("building alg=none token: %v", err)
+	}
+
+	if _, err := ParseToken("secret", unsigned); err == nil {
+		t.Error("ParseToken() accepted an alg=none token, want rejection")
 	}
 }

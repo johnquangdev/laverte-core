@@ -13,9 +13,11 @@ import (
 type redisLimiter struct{ client *redis.Client }
 
 func NewRedis(cfg *config.Config) ILimiter {
+	// ParseURL's error embeds the URL, which can carry a password — keep it out
+	// of a panic that lands in crash logs.
 	opt, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
-		panic("util/ratelimit/redis: " + err.Error())
+		panic("util/ratelimit/redis: REDIS_URL is not a valid redis:// URL")
 	}
 	return &redisLimiter{client: redis.NewClient(opt)}
 }
