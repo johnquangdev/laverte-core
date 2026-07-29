@@ -36,6 +36,16 @@ func (stubAdminUC) ListAdmins(context.Context) ([]presenter.AdminListItemRespons
 func (stubAdminUC) GrantAdmin(context.Context, payload.GrantAdminRequest, uint) error { return nil }
 func (stubAdminUC) RevokeAdmin(context.Context, uint) error                           { return nil }
 
+type stubHomeAdminUC struct{}
+
+func (stubHomeAdminUC) Create(context.Context, payload.CreateHomeRequest) (*presenter.HomeResponse, error) {
+	return nil, nil
+}
+func (stubHomeAdminUC) Update(context.Context, uint, payload.UpdateHomeRequest) (*presenter.HomeResponse, error) {
+	return nil, nil
+}
+func (stubHomeAdminUC) List(context.Context) ([]presenter.HomeResponse, error) { return nil, nil }
+
 // stubTokenStore reports nothing revoked, so router tests need no Redis.
 type stubTokenStore struct{}
 
@@ -53,6 +63,7 @@ func newTestServer() *Server {
 		AuthUC:            stubAuthUC{},
 		AdminUC:           stubAdminUC{},
 		AdminRoleResolver: jwtmw.AdminRoleResolverFunc(func(context.Context, uint) (string, error) { return "", nil }),
+		HomeAdminUC:       stubHomeAdminUC{},
 	})
 }
 

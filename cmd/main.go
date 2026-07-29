@@ -13,10 +13,12 @@ import (
 	httpserver "github.com/johnquangdev/laverte-home/delivery/http"
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
 	"github.com/johnquangdev/laverte-home/migrations"
+	homerepo "github.com/johnquangdev/laverte-home/repository/home"
 	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refreshtoken"
 	userrepo "github.com/johnquangdev/laverte-home/repository/user"
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
+	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
 	"github.com/johnquangdev/laverte-home/util/oauth"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
 	"github.com/johnquangdev/laverte-home/util/tokenstore"
@@ -36,6 +38,7 @@ func main() {
 
 	users := userrepo.NewPG(dbFactory)
 	tokens := refreshtokenrepo.NewPG(dbFactory)
+	homes := homerepo.NewPG(dbFactory)
 
 	oauthSvc := oauth.NewGoogle(cfg)
 	tokenStore := tokenstore.NewRedis(cfg)
@@ -43,6 +46,7 @@ func main() {
 
 	authUC := authuc.New(users, tokens, oauthSvc, tokenStore, *cfg, log)
 	adminUC := adminuc.New(users)
+	homeAdminUC := homeadminuc.New(homes)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
 		u, err := users.GetByID(ctx, userID)
@@ -58,6 +62,7 @@ func main() {
 		AuthUC:            authUC,
 		AdminUC:           adminUC,
 		AdminRoleResolver: adminRoleResolver,
+		HomeAdminUC:       homeAdminUC,
 	})
 	log.Info("starting server", zap.String("port", cfg.Port))
 	if err := srv.Start(); err != nil {
