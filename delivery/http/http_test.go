@@ -77,6 +77,10 @@ func (stubBookingUC) Create(context.Context, payload.CreateBookingRequest) (*pre
 	return nil, nil
 }
 
+type stubBillingUC struct{}
+
+func (stubBillingUC) HandleSePayWebhook(context.Context, []byte, http.Header) error { return nil }
+
 // stubTokenStore reports nothing revoked, so router tests need no Redis.
 type stubTokenStore struct{}
 
@@ -98,6 +102,7 @@ func newTestServer() *Server {
 		PricingAdminUC:    stubPricingAdminUC{},
 		BlockedSlotUC:     stubBlockedSlotUC{},
 		BookingUC:         stubBookingUC{},
+		BillingUC:         stubBillingUC{},
 	})
 }
 
@@ -131,6 +136,7 @@ func TestAdminHomeCreateRejectsEmptyBody(t *testing.T) {
 		PricingAdminUC:    stubPricingAdminUC{},
 		BlockedSlotUC:     stubBlockedSlotUC{},
 		BookingUC:         stubBookingUC{},
+		BillingUC:         stubBillingUC{},
 	})
 
 	token, err := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7}, time.Hour)

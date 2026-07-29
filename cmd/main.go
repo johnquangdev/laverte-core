@@ -22,12 +22,15 @@ import (
 	userrepo "github.com/johnquangdev/laverte-home/repository/user"
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
+	billinguc "github.com/johnquangdev/laverte-home/usecase/billing"
 	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
 	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
 	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
 	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-home/util/checkout"
+	"github.com/johnquangdev/laverte-home/util/gcalendar"
+	"github.com/johnquangdev/laverte-home/util/notify"
 	"github.com/johnquangdev/laverte-home/util/oauth"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
 	"github.com/johnquangdev/laverte-home/util/tokenstore"
@@ -67,6 +70,15 @@ func main() {
 	pricingUC := pricinguc.New(pricingRules)
 	bookingUC := bookinguc.New(bookings, homes, blockedSlots, payments, pricingUC, sepay, *cfg, log)
 
+	// TODO(Google Calendar adapter): wire the real service-account client;
+	// bookings confirm without a calendar event until then.
+	calendarSvc := gcalendar.NewNoop()
+	// TODO(ZNS/email notifier): wire the real adapter; guests and admins get
+	// no booking notifications until then.
+	notifier := notify.NewNoop()
+
+	billingUC := billinguc.New(bookings, payments, sepay, notifier, calendarSvc, homes, log, *cfg)
+
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
 		u, err := users.GetByID(ctx, userID)
 		if err != nil {
@@ -85,6 +97,7 @@ func main() {
 		PricingAdminUC:    pricingAdminUC,
 		BlockedSlotUC:     blockedSlotUC,
 		BookingUC:         bookingUC,
+		BillingUC:         billingUC,
 	})
 	log.Info("starting server", zap.String("port", cfg.Port))
 	if err := srv.Start(); err != nil {

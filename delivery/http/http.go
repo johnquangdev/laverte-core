@@ -16,9 +16,11 @@ import (
 	authhttp "github.com/johnquangdev/laverte-home/delivery/http/auth"
 	bookinghttp "github.com/johnquangdev/laverte-home/delivery/http/booking"
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
+	webhookhttp "github.com/johnquangdev/laverte-home/delivery/http/webhook"
 	apperr "github.com/johnquangdev/laverte-home/errors"
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
+	billinguc "github.com/johnquangdev/laverte-home/usecase/billing"
 	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
 	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
@@ -77,6 +79,7 @@ type Deps struct {
 	PricingAdminUC    pricingadminuc.IUseCase
 	BlockedSlotUC     blockedslotuc.IUseCase
 	BookingUC         bookinguc.IUseCase
+	BillingUC         billinguc.IUseCase
 }
 
 func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
@@ -130,6 +133,11 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	bookingIPLimit := jwtmw.RateLimitByIP("booking", deps.Limiter, cfg.RateLimitBookingPerMinIP, window)
 	bookingPhoneLimit := jwtmw.RateLimitByPhone("booking", deps.Limiter, cfg.RateLimitBookingPerMinPhone, window)
 	bookinghttp.Init(api.Group("/bookings", bookingIPLimit), deps.BookingUC, handleErr, handleOK, bookingPhoneLimit)
+
+	// The provider's own retries are the load here, so this limit is much
+	// higher than the guest-facing ones.
+	webhookLimit := jwtmw.RateLimitByIP("payment-webhook", deps.Limiter, cfg.RateLimitWebhookPerMin, window)
+	webhookhttp.Init(api.Group("/webhooks", webhookLimit), deps.BillingUC, handleErr, handleOK)
 
 	authed := api.Group("", jwtmw.JWTAuth(cfg, deps.TokenStore), userLimit)
 	requireAdmin := jwtmw.RequireAdmin(cfg, deps.AdminRoleResolver)
