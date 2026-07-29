@@ -101,7 +101,7 @@ RefreshToken                -- y hệt lumen (token rotation theo family)
 ```
 
 **Chống double-booking ở tầng DB:** Postgres exclusion constraint (extension
-`btree_gist`) trên `(home_id, tsrange(start_time, end_time))`, chỉ áp dụng khi
+`btree_gist`) trên `(home_id, tstzrange(start_time, end_time))`, chỉ áp dụng khi
 `status IN ('pending_payment', 'confirmed')`. Hai request đặt trùng giờ cùng lúc —
 request thứ hai bị Postgres từ chối ngay ở transaction, không phải xử lý race
 condition thủ công ở tầng Go.
@@ -124,8 +124,9 @@ sửa giá qua API, không đụng code.
 4. Tạo `Booking(status=pending_payment, expires_at=now+15p)` + `Payment(status=pending)`
    trong 1 transaction, gọi SePay tạo VietQR nội dung `LAVERTE {booking_id}` → trả
    QR cho FE.
-5. Webhook `POST /api/v1/webhooks/sepay` (public, rate-limit theo IP, xác thực qua
-   token của SePay) → match nội dung chuyển khoản với `booking_id`, verify đúng số
+5. Webhook `POST /api/v1/webhooks/sepay` (public, rate-limit theo IP, xác thực
+   bằng HMAC-SHA256 trên `"<timestamp>.<raw body>"` kèm cửa sổ chống replay 5
+   phút) → match nội dung chuyển khoản với `booking_id`, verify đúng số
    tiền, idempotent nếu đã confirmed trước đó → `Payment.status=paid`,
    `Booking.status=confirmed` → đẩy event lên Google Calendar → gửi ZNS "Đặt phòng
    thành công" cho khách.
@@ -141,10 +142,13 @@ tiền mặt tại chỗ), vẫn qua constraint DB chống trùng giờ.
 **SePay client (`util/checkout/sepay.go`):**
 ```go
 type IPaymentProvider interface {
-    CreateQR(ctx context.Context, req CreatePaymentRequest) (*QRResult, error)
-    VerifyWebhook(r *http.Request) (*WebhookEvent, error)
+    CreateQR(ctx context.Context, req CreateQRRequest) (*QRResult, error)
+    VerifyWebhook(ctx context.Context, raw []byte, headers http.Header) (*WebhookEvent, error)
 }
 ```
+`VerifyWebhook` nhận raw bytes chứ không nhận `*http.Request`: chữ ký HMAC-SHA256
+của SePay tính trên đúng body thô, marshal lại sẽ làm sai chữ ký.
+
 Chỉ 1 implementation `SePay` (VietQR bank-transfer + webhook). Không có
 Router/Pool/Breaker/ProviderQuota — bỏ hẳn so với lumen vì chỉ có 1 provider.
 
@@ -184,9 +188,11 @@ không rành kỹ thuật (dùng để giải thích cho chủ nhà/đối tác 
 ## 7. Auth & Admin API
 
 **Auth** (port từ lumen, giữ khung, bớt trường không cần):
-- `POST /api/v1/auth/google/login` → `oauth.Google.Exchange` → tạo/lấy `User`,
-  phát access+refresh JWT (refresh-token rotation theo family qua
-  `token_store/redis`).
+- `GET /api/v1/auth/google/login-url` → sinh authorize URL + lưu `state`
+  (single-use, TTL 10 phút trong Redis) để chống CSRF.
+- `POST /api/v1/auth/google/callback` → verify `state` → `oauth.Google.Exchange`
+  → tạo/lấy `User` → phát access+refresh JWT (refresh-token rotation theo family
+  qua `token_store/redis`).
 - `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout`.
 - Không bắt buộc cho khách đặt phòng — chỉ dùng cho admin/staff đăng nhập; giữ chỗ
   sẵn (`User.role`, `User.phone`) cho tính năng tích điểm sau này, không implement
@@ -195,8 +201,9 @@ không rành kỹ thuật (dùng để giải thích cho chủ nhà/đối tác 
 **Admin API** (`authed.Group("/admin", requireAdmin)`):
 ```
 GET/POST/PUT   /admin/homes                        -- CRUD home + category
-GET/POST/PUT   /admin/pricing-rules?category=...    -- cấu hình bảng giá theo hạng
-GET            /admin/bookings?home_id&date=         -- danh sách booking theo home/ngày
+GET/POST       /admin/pricing-rules?category=...   -- xem/tạo bảng giá theo hạng
+PUT            /admin/pricing-rules/:id             -- đổi giá: đóng rule cũ + tạo rule mới
+GET            /admin/bookings?home_id&date=       -- danh sách booking theo home/ngày
 POST           /admin/bookings                       -- tạo walk-in
 PATCH          /admin/bookings/:id/cancel             -- huỷ (xoá luôn Calendar event)
 PATCH          /admin/bookings/:id/complete
