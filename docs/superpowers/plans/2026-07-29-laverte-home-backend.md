@@ -900,9 +900,11 @@ import (
 type redisLimiter struct{ client *redis.Client }
 
 func NewRedis(cfg *config.Config) ILimiter {
+	// ParseURL's error embeds the URL, which can carry a password — keep it out
+	// of a panic that lands in crash logs.
 	opt, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
-		panic("util/ratelimit/redis: " + err.Error())
+		panic("util/ratelimit/redis: REDIS_URL is not a valid redis:// URL")
 	}
 	return &redisLimiter{client: redis.NewClient(opt)}
 }
@@ -1111,6 +1113,8 @@ package util
 import (
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestGenerateAndParseToken(t *testing.T) {
@@ -1140,6 +1144,21 @@ func TestParseTokenRejectsExpired(t *testing.T) {
 	tokenStr, _ := GenerateToken("secret", Claims{UserID: 1}, -time.Minute)
 	if _, err := ParseToken("secret", tokenStr); err == nil {
 		t.Error("ParseToken() with expired token = nil error, want error")
+	}
+}
+
+// ParseToken must reject a token whose header claims a non-HMAC algorithm.
+// Without the signing-method check, an attacker could present an unsigned
+// (alg=none) token and have its claims trusted.
+func TestParseTokenRejectsNonHMACAlgorithm(t *testing.T) {
+	claims := Claims{UserID: 99, TokenID: "forged"}
+	unsigned, err := jwt.NewWithClaims(jwt.SigningMethodNone, claims).SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatalf("building alg=none token: %v", err)
+	}
+
+	if _, err := ParseToken("secret", unsigned); err == nil {
+		t.Error("ParseToken() accepted an alg=none token, want rejection")
 	}
 }
 ```
@@ -1179,14 +1198,24 @@ import (
 	"github.com/johnquangdev/laverte-home/config"
 )
 
-type redisStore struct{ client *redis.Client }
+type redisStore struct {
+	client       *redis.Client
+	blacklistTTL time.Duration
+}
 
 func NewRedis(cfg *config.Config) ITokenStore {
+	// The error from ParseURL embeds the URL it was given, and REDIS_URL can
+	// carry a password — never put it in a panic that lands in crash logs.
 	opt, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
-		panic("util/tokenstore/redis: " + err.Error())
+		panic("util/tokenstore/redis: REDIS_URL is not a valid redis:// URL")
 	}
-	return &redisStore{client: redis.NewClient(opt)}
+	// A blacklist entry only has to outlive the token it revokes. Derived from
+	// the access TTL rather than hardcoded, so raising JWT_ACCESS_TTL_MINUTES
+	// can't silently leave revoked tokens usable again once the key expires.
+	// The extra minute absorbs clock skew between this process and Redis.
+	ttl := time.Duration(cfg.JWTAccessTTLMinutes)*time.Minute + time.Minute
+	return &redisStore{client: redis.NewClient(opt), blacklistTTL: ttl}
 }
 
 func (r *redisStore) SaveState(ctx context.Context, state string) error {
@@ -1199,7 +1228,7 @@ func (r *redisStore) ValidateState(ctx context.Context, state string) (bool, err
 }
 
 func (r *redisStore) BlacklistToken(ctx context.Context, tokenID string) error {
-	return r.client.Set(ctx, "jwt:blacklist:"+tokenID, "1", 24*time.Hour).Err()
+	return r.client.Set(ctx, "jwt:blacklist:"+tokenID, "1", r.blacklistTTL).Err()
 }
 
 func (r *redisStore) IsBlacklisted(ctx context.Context, tokenID string) (bool, error) {
@@ -1539,13 +1568,24 @@ import (
 
 	"github.com/johnquangdev/laverte-home/config"
 	"github.com/johnquangdev/laverte-home/util"
+	"github.com/johnquangdev/laverte-home/util/tokenstore"
 )
 
 type contextKey string
 
 const ClaimsKey contextKey = "claims"
 
-func JWTAuth(cfg config.Config) echo.MiddlewareFunc {
+// JWTAuth authenticates a bearer access token and rejects one that Logout has
+// revoked. The store lookup is what makes logout mean anything: the JWT stays
+// cryptographically valid until it expires, so without consulting the blacklist
+// a logged-out token would keep working for the rest of its TTL.
+//
+// The blacklist check fails CLOSED — a Redis error rejects the request. This is
+// the opposite of the rate limiter's stance on purpose: a limiter that can't
+// reach Redis should degrade protection rather than take the API down, but an
+// authorization check that can't confirm a token is still valid must not let it
+// through.
+func JWTAuth(cfg config.Config, store tokenstore.ITokenStore) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			header := c.Request().Header.Get("Authorization")
@@ -1555,6 +1595,10 @@ func JWTAuth(cfg config.Config) echo.MiddlewareFunc {
 			tokenStr := strings.TrimPrefix(header, "Bearer ")
 			claims, err := util.ParseToken(cfg.JWTAccessSecret, tokenStr)
 			if err != nil {
+				return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+			}
+			revoked, err := store.IsBlacklisted(c.Request().Context(), claims.TokenID)
+			if err != nil || revoked {
 				return c.JSON(http.StatusUnauthorized, map[string]string{"error": "invalid token"})
 			}
 			c.Set(string(ClaimsKey), claims)
@@ -1590,13 +1634,27 @@ import (
 	"github.com/johnquangdev/laverte-home/util"
 )
 
+// fakeTokenStore reports whichever revocation state a test needs, so the
+// middleware tests never touch Redis.
+type fakeTokenStore struct {
+	revoked bool
+	err     error
+}
+
+func (f fakeTokenStore) SaveState(context.Context, string) error             { return nil }
+func (f fakeTokenStore) ValidateState(context.Context, string) (bool, error) { return true, nil }
+func (f fakeTokenStore) BlacklistToken(context.Context, string) error        { return nil }
+func (f fakeTokenStore) IsBlacklisted(context.Context, string) (bool, error) {
+	return f.revoked, f.err
+}
+
 func TestJWTAuthRejectsMissingHeader(t *testing.T) {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	handler := JWTAuth(config.Config{JWTAccessSecret: "s"})(func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	handler := JWTAuth(config.Config{JWTAccessSecret: "s"}, fakeTokenStore{})(func(c echo.Context) error { return c.NoContent(http.StatusOK) })
 	if err := handler(c); err != nil {
 		t.Fatalf("handler error = %v", err)
 	}
@@ -1616,7 +1674,7 @@ func TestJWTAuthAcceptsValidToken(t *testing.T) {
 	c := e.NewContext(req, rec)
 
 	var gotUserID uint
-	handler := JWTAuth(cfg)(func(c echo.Context) error {
+	handler := JWTAuth(cfg, fakeTokenStore{})(func(c echo.Context) error {
 		gotUserID = ClaimsFromContext(c).UserID
 		return c.NoContent(http.StatusOK)
 	})
@@ -1630,7 +1688,60 @@ func TestJWTAuthAcceptsValidToken(t *testing.T) {
 		t.Errorf("UserID = %d, want 7", gotUserID)
 	}
 }
+
+// A revoked token is still cryptographically valid, so this is the only thing
+// that makes Logout mean anything.
+func TestJWTAuthRejectsRevokedToken(t *testing.T) {
+	cfg := config.Config{JWTAccessSecret: "s"}
+	tokenStr, _ := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7, TokenID: "tok-1"}, time.Hour)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	called := false
+	handler := JWTAuth(cfg, fakeTokenStore{revoked: true})(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	if err := handler(c); err != nil {
+		t.Fatalf("handler error = %v", err)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+	if called {
+		t.Error("next handler ran for a revoked token")
+	}
+}
+
+// Authorization must fail closed: if the store can't confirm the token is still
+// valid, the request does not get through.
+func TestJWTAuthRejectsWhenStoreErrors(t *testing.T) {
+	cfg := config.Config{JWTAccessSecret: "s"}
+	tokenStr, _ := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7, TokenID: "tok-1"}, time.Hour)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	handler := JWTAuth(cfg, fakeTokenStore{err: errors.New("redis down")})(func(c echo.Context) error {
+		return c.NoContent(http.StatusOK)
+	})
+	if err := handler(c); err != nil {
+		t.Fatalf("handler error = %v", err)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
 ```
+
+The test file needs `"context"` and `"errors"` in its import block for the fake store and the fail-closed test.
 
 - [ ] **Step 9: Run tests to verify they pass**
 
@@ -2522,6 +2633,7 @@ import (
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
+	"github.com/johnquangdev/laverte-home/util/tokenstore"
 )
 
 type errBody struct {
@@ -2541,7 +2653,9 @@ type Server struct {
 // later task adds one more dependency here — a named field can be appended
 // without silently shifting the meaning of every existing call site.
 type Deps struct {
-	Limiter           ratelimit.ILimiter
+	Limiter ratelimit.ILimiter
+	// TokenStore is read by JWTAuth to reject tokens Logout has revoked.
+	TokenStore        tokenstore.ITokenStore
 	AuthUC            authuc.IUseCase
 	AdminUC           adminuc.IUseCase
 	AdminRoleResolver jwtmw.AdminRoleResolver
@@ -2589,7 +2703,7 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 
 	authhttp.Init(api.Group("/auth", ipLimit), deps.AuthUC, handleErr, handleOK)
 
-	authed := api.Group("", jwtmw.JWTAuth(cfg), userLimit)
+	authed := api.Group("", jwtmw.JWTAuth(cfg, deps.TokenStore), userLimit)
 	requireAdmin := jwtmw.RequireAdmin(cfg, deps.AdminRoleResolver)
 	adminGroup := authed.Group("/admin", requireAdmin)
 	adminhttp.Init(adminGroup, deps.AdminUC, handleErr, handleOK, jwtmw.RequireSuperAdmin(cfg))
@@ -2667,9 +2781,18 @@ func (stubAdminUC) RevokeAdmin(context.Context, uint) error                     
 // newTestServer builds a router with stubbed dependencies. Later tasks add one
 // more field to Deps each; because they are named, this helper only needs a new
 // line per task rather than a re-ordered argument list.
+// stubTokenStore reports nothing revoked, so router tests need no Redis.
+type stubTokenStore struct{}
+
+func (stubTokenStore) SaveState(context.Context, string) error            { return nil }
+func (stubTokenStore) ValidateState(context.Context, string) (bool, error) { return true, nil }
+func (stubTokenStore) BlacklistToken(context.Context, string) error       { return nil }
+func (stubTokenStore) IsBlacklisted(context.Context, string) (bool, error) { return false, nil }
+
 func newTestServer() *Server {
 	return NewServer(config.Config{FrontendURL: "http://localhost:3000"}, zap.NewNop(), Deps{
 		Limiter:           ratelimit.NewMemory(),
+		TokenStore:        stubTokenStore{},
 		AuthUC:            stubAuthUC{},
 		AdminUC:           stubAdminUC{},
 		AdminRoleResolver: jwtmw.AdminRoleResolverFunc(func(context.Context, uint) (string, error) { return "", nil }),
@@ -2761,6 +2884,7 @@ func main() {
 
 	srv := httpserver.NewServer(*cfg, log, httpserver.Deps{
 		Limiter:           limiter,
+		TokenStore:        tokenStore,
 		AuthUC:            authUC,
 		AdminUC:           adminUC,
 		AdminRoleResolver: adminRoleResolver,
