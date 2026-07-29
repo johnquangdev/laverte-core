@@ -85,6 +85,9 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	e.Validator = &requestValidator{v: validator.New()}
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestID())
+	// Guards the public, unauthenticated bookings endpoint (and every other route)
+	// against an oversized body tying up a request goroutine before validation ever runs.
+	e.Use(middleware.BodyLimit("64K"))
 	e.Use(middleware.SecureWithConfig(middleware.SecureConfig{
 		XSSProtection: "1; mode=block", ContentTypeNosniff: "nosniff",
 		XFrameOptions: "DENY", ReferrerPolicy: "no-referrer",

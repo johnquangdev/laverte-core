@@ -94,3 +94,22 @@ func TestPhoneLimitAllowsDifferentPhonesFromSameIP(t *testing.T) {
 		t.Fatalf("second request (SAME ip, different phone 0900000002) status = %d, want 200, body=%s", rec2.Code, rec2.Body.String())
 	}
 }
+
+// TestPhoneLimitSharesQuotaAcrossPhoneFormats proves bindBookingRequest normalizes the
+// phone before publishing it into the context: "0900000001" and "+84900000001" are the
+// same Vietnamese number, so they must share one per-phone quota, not double it. If the
+// normalization were removed, RateLimitByPhone would see two distinct keys and both
+// requests below would be allowed.
+func TestPhoneLimitSharesQuotaAcrossPhoneFormats(t *testing.T) {
+	e := newRouterWithPhoneLimit(t, 1)
+
+	rec1 := doBookingRequest(e, "0900000001", "3.3.3.3:4444")
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request (phone 0900000001) status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	rec2 := doBookingRequest(e, "+84900000001", "4.4.4.4:5555")
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request (SAME number written as +84900000001, different IP) status = %d, want 429 — normalization must map both to one quota", rec2.Code)
+	}
+}

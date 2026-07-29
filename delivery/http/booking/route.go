@@ -5,6 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/payload"
 	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
 )
@@ -29,7 +30,9 @@ func bindBookingRequest(handleErr HandleErrFunc) echo.MiddlewareFunc {
 				return handleErr(c, err)
 			}
 			c.Set("booking_request", req)
-			c.Set("customer_phone", req.CustomerPhone)
+			// Keyed on the canonical form so two spellings of one number ("0900000001"
+			// vs "+84900000001") share one rate-limit bucket instead of doubling it.
+			c.Set("customer_phone", model.NormalizeVNPhone(req.CustomerPhone))
 			return next(c)
 		}
 	}

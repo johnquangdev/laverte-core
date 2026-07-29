@@ -65,7 +65,7 @@ func main() {
 	pricingAdminUC := pricingadminuc.New(pricingRules)
 	blockedSlotUC := blockedslotuc.New(blockedSlots)
 	pricingUC := pricinguc.New(pricingRules)
-	bookingUC := bookinguc.New(bookings, homes, blockedSlots, payments, pricingUC, sepay, *cfg)
+	bookingUC := bookinguc.New(bookings, homes, blockedSlots, payments, pricingUC, sepay, *cfg, log)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
 		u, err := users.GetByID(ctx, userID)

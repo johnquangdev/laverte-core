@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	apperr "github.com/johnquangdev/laverte-home/errors"
@@ -23,18 +24,45 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 		return nil, apperr.Validation("booking_type phai la 'hourly', 'overnight' hoac 'day'")
 	}
 
-	// Re-use check runs before pricing, slot checks and any provider call: a
-	// phone still holding an un-expired pending booking gets its existing QR
-	// back, so one caller cannot mint an unbounded pile of unpaid QR codes.
-	existing, err := uc.bookingRepo.GetPendingByPhone(ctx, req.CustomerPhone)
+	// Every phone-keyed lookup (re-use check, rate limiter, stored booking) must use
+	// one canonical form, or "0900000001"/"+84900000001"/"84900000001" count as three
+	// different callers and silently triple the intended per-phone quota.
+	phone := model.NormalizeVNPhone(req.CustomerPhone)
+	if len(phone) < 10 {
+		return nil, apperr.Validation("so dien thoai khong hop le")
+	}
+
+	// Re-use check runs before pricing, slot checks and any provider call: a phone
+	// still holding an un-expired pending booking must not mint a second hold or a
+	// second QR.
+	//
+	// It only hands the booking back when the request MATCHES that hold — same home,
+	// same window — which is a guest retrying and re-reading their own QR. Anyone can
+	// put any phone number in this body, and this endpoint is public, so returning a
+	// stored booking for a phone the caller merely typed would disclose a stranger's
+	// name, which property they are staying at, when, and a payable QR. A
+	// non-matching request is refused instead, saying only that the phone already has
+	// a pending booking.
+	existing, err := uc.bookingRepo.GetPendingByPhone(ctx, phone)
 	switch {
 	case err == nil:
+		if existing.HomeID != req.HomeID ||
+			!existing.StartTime.Equal(req.StartTime) ||
+			!existing.EndTime.Equal(req.EndTime) {
+			return nil, apperr.Conflict(nil, "so dien thoai nay dang co mot booking cho thanh toan — vui long hoan tat hoac doi den khi no het han")
+		}
 		pay, payErr := uc.paymentRepo.GetByBookingID(ctx, existing.ID)
-		if payErr != nil {
+		if payErr == nil && pay.QRContent != "" {
+			resp := presenter.ToBookingResponse(existing, pay.QRContent)
+			return &resp, nil
+		}
+		if payErr != nil && !errors.Is(payErr, gorm.ErrRecordNotFound) {
 			return nil, apperr.Internal(payErr)
 		}
-		resp := presenter.ToBookingResponse(existing, pay.QRContent)
-		return &resp, nil
+		// A hold with no usable payment row is an orphan left by a create that died
+		// after the booking row committed. Release it rather than answering 500 for
+		// the rest of its TTL, and fall through to build a fresh one.
+		uc.releaseBooking(ctx, existing)
 	case !errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, apperr.Internal(err)
 	}
@@ -65,7 +93,7 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 	b := &model.Booking{
 		HomeID:        req.HomeID,
 		CustomerName:  req.CustomerName,
-		CustomerPhone: req.CustomerPhone,
+		CustomerPhone: phone,
 		StartTime:     req.StartTime,
 		EndTime:       req.EndTime,
 		BookingType:   req.BookingType,
@@ -82,9 +110,21 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 		return nil, apperr.Internal(err)
 	}
 
+	// From here the row is committed and already occupying the slot, so anything that
+	// fails below must release it. Leaving it would make that window unbookable for
+	// the whole pending TTL for a booking nobody can pay, and the guest's own retry
+	// would keep finding it.
+	release := func(cause error) error {
+		uc.releaseBooking(ctx, b)
+		return cause
+	}
+
 	qr, err := uc.payment.CreateQR(ctx, checkout.CreateQRRequest{BookingID: b.ID, AmountVND: price})
 	if err != nil {
-		return nil, apperr.Internal(err)
+		return nil, release(apperr.Internal(err))
+	}
+	if qr.QRContent == "" {
+		return nil, release(apperr.Internal(errors.New("checkout: provider returned an empty QR")))
 	}
 
 	pay := &model.Payment{
@@ -95,14 +135,29 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 		QRContent: qr.QRContent,
 	}
 	if err = uc.paymentRepo.Create(ctx, pay); err != nil {
-		return nil, apperr.Internal(err)
+		return nil, release(apperr.Internal(err))
 	}
 
 	b.PaymentID = &pay.ID
 	if err = uc.bookingRepo.Update(ctx, b); err != nil {
+		// The payment row already carries the QR and is reachable via GetByBookingID
+		// independent of this link, so a guest retry recovers through the match path
+		// above rather than needing a release here.
 		return nil, apperr.Internal(err)
 	}
 
 	resp := presenter.ToBookingResponse(b, qr.QRContent)
 	return &resp, nil
+}
+
+// releaseBooking frees a hold's slot immediately by moving it out of the statuses the
+// exclusion constraint covers. Best-effort by design: the caller is already returning
+// an error, and the expiry sweep would collect the row eventually — this only stops the
+// window being unbookable until then.
+func (uc *UseCase) releaseBooking(ctx context.Context, b *model.Booking) {
+	b.Status = model.BookingStatusExpired
+	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+		uc.log.Error("could not release a booking hold after a failed create",
+			zap.Uint("booking_id", b.ID), zap.Error(err))
+	}
 }

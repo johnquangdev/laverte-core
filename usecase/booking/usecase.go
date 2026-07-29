@@ -1,6 +1,8 @@
 package booking
 
 import (
+	"go.uber.org/zap"
+
 	"github.com/johnquangdev/laverte-home/config"
 	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
 	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
@@ -18,6 +20,7 @@ type UseCase struct {
 	pricingUC       pricinguc.IUseCase
 	payment         checkout.IPaymentProvider
 	cfg             config.Config
+	log             *zap.Logger
 }
 
 func New(
@@ -28,6 +31,7 @@ func New(
 	pricingUC pricinguc.IUseCase,
 	payment checkout.IPaymentProvider,
 	cfg config.Config,
+	log *zap.Logger,
 ) IUseCase {
 	return &UseCase{
 		bookingRepo:     bookingRepo,
@@ -37,5 +41,6 @@ func New(
 		pricingUC:       pricingUC,
 		payment:         payment,
 		cfg:             cfg,
+		log:             log,
 	}
 }
