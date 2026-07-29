@@ -3148,7 +3148,10 @@ func IsValidHomeCategory(c string) bool {
 CREATE TABLE homes (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
-    category TEXT NOT NULL,
+    -- Pricing resolves by category (see usecase/pricing), so a value outside these
+    -- two would produce a home that cannot be priced. The usecase checks it too;
+    -- this is the backstop for any future writer that bypasses the usecase.
+    category TEXT NOT NULL CHECK (category IN ('home', 'nest')),
     address TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
     google_calendar_id TEXT NOT NULL DEFAULT '',
@@ -3231,13 +3234,18 @@ type CreateHomeRequest struct {
 	Description string `json:"description"`
 }
 
+// UpdateHomeRequest replaces the descriptive fields outright, but IsActive and
+// GoogleCalendarID are pointers on purpose: for a plain value an omitted JSON key
+// is indistinguishable from an explicit zero, so an admin editing only the address
+// would silently take the home out of service and blank its calendar link. Nil
+// means "leave as-is".
 type UpdateHomeRequest struct {
-	Name             string `json:"name" validate:"required"`
-	Category         string `json:"category" validate:"required,oneof=home nest"`
-	Address          string `json:"address"`
-	Description      string `json:"description"`
-	GoogleCalendarID string `json:"google_calendar_id"`
-	IsActive         bool   `json:"is_active"`
+	Name             string  `json:"name" validate:"required"`
+	Category         string  `json:"category" validate:"required,oneof=home nest"`
+	Address          string  `json:"address"`
+	Description      string  `json:"description"`
+	GoogleCalendarID *string `json:"google_calendar_id"`
+	IsActive         *bool   `json:"is_active"`
 }
 ```
 
@@ -3325,7 +3333,12 @@ func (uc *UseCase) Update(ctx context.Context, id uint, req payload.UpdateHomeRe
 		return nil, apperr.NotFound(err)
 	}
 	h.Name, h.Category, h.Address, h.Description = req.Name, req.Category, req.Address, req.Description
-	h.GoogleCalendarID, h.IsActive = req.GoogleCalendarID, req.IsActive
+	if req.GoogleCalendarID != nil {
+		h.GoogleCalendarID = *req.GoogleCalendarID
+	}
+	if req.IsActive != nil {
+		h.IsActive = *req.IsActive
+	}
 	if err := uc.repo.Update(ctx, h); err != nil {
 		return nil, apperr.Internal(err)
 	}
@@ -3353,6 +3366,7 @@ package homeadmin
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	apperr "github.com/johnquangdev/laverte-home/errors"
@@ -3409,6 +3423,100 @@ func TestCreateAndListRoundTrip(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].ID != created.ID {
 		t.Errorf("List() = %+v, want one item with ID %d", list, created.ID)
+	}
+}
+
+func boolp(v bool) *bool     { return &v }
+func strp(v string) *string  { return &v }
+
+// The trap this guards: an admin editing one text field sends no is_active and no
+// google_calendar_id, and a plain-value payload would read those omissions as
+// "false" and "" — silently pulling the home out of service and dropping its
+// calendar link. Omitted must mean unchanged.
+func TestUpdateLeavesOmittedFlagsUntouched(t *testing.T) {
+	repo := newFakeRepo()
+	uc := New(repo)
+	ctx := context.Background()
+
+	created, err := uc.Create(ctx, payload.CreateHomeRequest{Name: "Home 1", Category: model.HomeCategoryHome})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	repo.homes[created.ID].GoogleCalendarID = "cal-abc"
+	repo.homes[created.ID].IsActive = true
+
+	got, err := uc.Update(ctx, created.ID, payload.UpdateHomeRequest{
+		Name: "Home 1", Category: model.HomeCategoryHome, Address: "12 Nguyen Trai",
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if !got.IsActive {
+		t.Error("Update() deactivated the home even though is_active was omitted")
+	}
+	if got.GoogleCalendarID != "cal-abc" {
+		t.Errorf("GoogleCalendarID = %q, want it left at cal-abc", got.GoogleCalendarID)
+	}
+	if got.Address != "12 Nguyen Trai" {
+		t.Errorf("Address = %q, want the update applied", got.Address)
+	}
+}
+
+// A present-but-false is_active is a real instruction and must be applied.
+func TestUpdateAppliesExplicitFlags(t *testing.T) {
+	repo := newFakeRepo()
+	uc := New(repo)
+	ctx := context.Background()
+
+	created, err := uc.Create(ctx, payload.CreateHomeRequest{Name: "Nest 2", Category: model.HomeCategoryNest})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	got, err := uc.Update(ctx, created.ID, payload.UpdateHomeRequest{
+		Name: "Nest 2", Category: model.HomeCategoryNest,
+		IsActive: boolp(false), GoogleCalendarID: strp("cal-xyz"),
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if got.IsActive {
+		t.Error("Update() ignored an explicit is_active=false")
+	}
+	if got.GoogleCalendarID != "cal-xyz" {
+		t.Errorf("GoogleCalendarID = %q, want cal-xyz", got.GoogleCalendarID)
+	}
+}
+
+func TestUpdateUnknownHomeIsNotFound(t *testing.T) {
+	uc := New(newFakeRepo())
+	_, err := uc.Update(context.Background(), 999, payload.UpdateHomeRequest{
+		Name: "X", Category: model.HomeCategoryHome,
+	})
+	e, ok := apperr.As(err)
+	if !ok {
+		t.Fatalf("error = %v, want an *apperr.Error", err)
+	}
+	if e.HTTPCode != http.StatusNotFound {
+		t.Errorf("HTTPCode = %d, want 404", e.HTTPCode)
+	}
+}
+
+func TestUpdateRejectsInvalidCategory(t *testing.T) {
+	repo := newFakeRepo()
+	uc := New(repo)
+	ctx := context.Background()
+
+	created, err := uc.Create(ctx, payload.CreateHomeRequest{Name: "Home 3", Category: model.HomeCategoryHome})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if _, err := uc.Update(ctx, created.ID, payload.UpdateHomeRequest{Name: "Home 3", Category: "villa"}); err == nil {
+		t.Fatal("Update() with an invalid category = nil error, want error")
+	}
+	if repo.homes[created.ID].Name != "Home 3" {
+		t.Error("a rejected Update must not have written anything")
 	}
 }
 ```
