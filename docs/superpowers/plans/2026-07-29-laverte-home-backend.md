@@ -9034,7 +9034,9 @@ func (z *ZNSNotifier) send(ctx context.Context, phone, templateID string, data m
 	defer func() { _ = resp.Body.Close() }()
 
 	var out znsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	// Cap the body before decoding: this is a network boundary, and the response is a
+	// handful of fields.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, znsMaxResponseBytes)).Decode(&out); err != nil {
 		return fmt.Errorf("notify/zns: decode response: %w", err)
 	}
 	// ZNS answers HTTP 200 even for rejected sends and reports the real outcome
@@ -9454,6 +9456,9 @@ import (
 	"github.com/johnquangdev/laverte-home/config"
 )
 
+// znsMaxResponseBytes caps the provider response before decoding.
+const znsMaxResponseBytes = 64 << 10
+
 // znsTimeout bounds a ZNS call. Notification is best-effort and called inline from
 // the webhook, so a hung provider must not hold the request open.
 const znsTimeout = 10 * time.Second
@@ -9466,8 +9471,11 @@ const znsTimeout = 10 * time.Second
 // behind apparently-working behaviour, and the lock-code flow depends on the admin
 // alert arriving. Returning the no-op makes the gap visible in the boot log instead.
 func FromConfig(cfg *config.Config, log *zap.Logger) INotifier {
-	znsReady := cfg.ZNSAccessToken != ""
-	smtpReady := cfg.SMTPHost != ""
+	znsReady := cfg.ZNSAccessToken != "" && cfg.ZNSBookingConfirmedTemplateID != "" && cfg.ZNSLockCodeTemplateID != ""
+	// A host with nowhere to send is not ready: every admin alert would fail at the
+	// recipient guard while guest messages went out normally, which is the
+	// half-working state this whole check exists to prevent.
+	smtpReady := cfg.SMTPHost != "" && cfg.AdminAlertEmail != ""
 	if znsReady && smtpReady {
 		return NewComposite(NewZNS(cfg, &http.Client{Timeout: znsTimeout}), NewSMTPAdmin(cfg))
 	}
