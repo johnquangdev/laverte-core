@@ -2,19 +2,25 @@ package pricingadmin
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
 	"gorm.io/gorm"
 
+	apperr "github.com/johnquangdev/laverte-home/errors"
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/payload"
+	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricingrule"
 )
 
 type fakeRepo struct {
 	byID    map[uint]*model.PricingRule
 	created []*model.PricingRule
 	nextID  uint
+	// createErr, when set, is what Create returns instead of succeeding — used to
+	// simulate the partial unique index rejecting a duplicate active rule.
+	createErr error
 }
 
 func newFakeRepo() *fakeRepo {
@@ -22,6 +28,9 @@ func newFakeRepo() *fakeRepo {
 }
 
 func (f *fakeRepo) Create(_ context.Context, r *model.PricingRule) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
 	f.nextID++
 	r.ID = f.nextID
 	f.byID[r.ID] = r
@@ -158,5 +167,22 @@ func TestCreateRejectsOvernightWithoutWindow(t *testing.T) {
 	}
 	if _, err := New(newFakeRepo()).Create(context.Background(), req); err == nil {
 		t.Fatal("Create() with overnight rule missing its window = nil error, want error")
+	}
+}
+
+// A duplicate Create is a caller mistake the admin can fix, so it must answer 409
+// with an actionable message — not the 500 a raw unique-violation would produce.
+func TestCreateDuplicateActiveRuleIsConflict(t *testing.T) {
+	repo := newFakeRepo()
+	repo.createErr = pricingrulerepo.ErrActiveRuleExists
+	uc := New(repo)
+
+	_, err := uc.Create(context.Background(), hourlyReq(200000))
+	e, ok := apperr.As(err)
+	if !ok {
+		t.Fatalf("error = %v, want an *apperr.Error", err)
+	}
+	if e.HTTPCode != http.StatusConflict {
+		t.Errorf("HTTPCode = %d, want 409", e.HTTPCode)
 	}
 }

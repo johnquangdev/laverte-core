@@ -2,10 +2,17 @@ package pricingrule
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/johnquangdev/laverte-home/model"
 )
+
+// ErrActiveRuleExists is returned by Create when the partial unique index rejects
+// a second active rule for one category+rule_type. Superseding an existing rule is
+// the supported way to change a price; creating a duplicate is a caller mistake,
+// not a server fault.
+var ErrActiveRuleExists = errors.New("pricingrule: an active rule already exists for this category and type")
 
 type IRepository interface {
 	Create(ctx context.Context, r *model.PricingRule) error

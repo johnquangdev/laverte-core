@@ -82,6 +82,9 @@ func (uc *UseCase) Create(ctx context.Context, req payload.UpsertPricingRuleRequ
 		FlatPrice: req.FlatPrice, EffectiveFrom: time.Now(), IsActive: true,
 	}
 	if err := uc.repo.Create(ctx, r); err != nil {
+		if errors.Is(err, pricingrulerepo.ErrActiveRuleExists) {
+			return nil, apperr.Conflict(err, "hang nay da co bang gia dang ap dung cho loai nay — dung PUT de doi gia")
+		}
 		return nil, apperr.Internal(err)
 	}
 	resp := presenter.ToPricingRuleResponse(r)

@@ -2,12 +2,18 @@ package pricingrule
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/johnquangdev/laverte-home/model"
 )
+
+// postgresUniqueViolation is the SQLSTATE Postgres raises when a unique index
+// rejects a row — here, idx_pricing_rules_one_active.
+const postgresUniqueViolation = "23505"
 
 type pgRepository struct {
 	getDB func(context.Context) *gorm.DB
@@ -16,7 +22,15 @@ type pgRepository struct {
 func NewPG(getDB func(context.Context) *gorm.DB) IRepository { return &pgRepository{getDB} }
 
 func (r *pgRepository) Create(ctx context.Context, rule *model.PricingRule) error {
-	return r.getDB(ctx).Create(rule).Error
+	err := r.getDB(ctx).Create(rule).Error
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == postgresUniqueViolation {
+		return ErrActiveRuleExists
+	}
+	return err
 }
 
 func (r *pgRepository) Supersede(ctx context.Context, oldID uint, replacement *model.PricingRule, at time.Time) error {

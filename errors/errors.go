@@ -15,6 +15,7 @@ const (
 	CodeAmountMismatch Code = "PAYMENT_AMOUNT_MISMATCH"
 	CodeValidation     Code = "VALIDATION_ERROR"
 	CodeUnauthorized   Code = "UNAUTHORIZED"
+	CodeConflict       Code = "CONFLICT"
 )
 
 type Error struct {
@@ -69,4 +70,11 @@ func BookingExpired(raw error) *Error {
 
 func AmountMismatch(raw error) *Error {
 	return &Error{Code: CodeAmountMismatch, CodeID: "payment_amount_mismatch", HTTPCode: http.StatusBadRequest, Message: "so tien thanh toan khong khop", Raw: raw}
+}
+
+// Conflict is for a request that collides with existing state the caller can see
+// and fix — "this already exists" — as opposed to SlotConflict, which is
+// specifically a booking overlapping another booking.
+func Conflict(raw error, msg string) *Error {
+	return &Error{Code: CodeConflict, CodeID: "conflict", HTTPCode: http.StatusConflict, Message: msg, Raw: raw}
 }
