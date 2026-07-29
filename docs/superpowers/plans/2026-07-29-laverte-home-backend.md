@@ -5459,7 +5459,17 @@ func (r *pgRepository) Create(ctx context.Context, s *model.BlockedSlot) error {
 }
 
 func (r *pgRepository) Delete(ctx context.Context, id uint) error {
-	return r.getDB(ctx).Delete(&model.BlockedSlot{}, id).Error
+	res := r.getDB(ctx).Delete(&model.BlockedSlot{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	// Reporting success for an id that was never there would tell the admin the
+	// home is bookable again while HasOverlap — which has no DB constraint behind
+	// it — goes on refusing bookings for the window they meant to clear.
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 func (r *pgRepository) ListByHome(ctx context.Context, homeID uint) ([]*model.BlockedSlot, error) {
@@ -5575,6 +5585,9 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBlockedSlotRequ
 
 func (uc *UseCase) Delete(ctx context.Context, id uint) error {
 	if err := uc.repo.Delete(ctx, id); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apperr.NotFound(err)
+		}
 		return apperr.Internal(err)
 	}
 	return nil
@@ -5592,6 +5605,136 @@ func (uc *UseCase) ListByHome(ctx context.Context, homeID uint) ([]presenter.Blo
 	return out, nil
 }
 ```
+
+- [ ] **Step 8b: Write `repository/blockedslot/pg_integration_test.go`**
+
+`HasOverlap` is the only query in this task that guards real money and has no
+database constraint behind it — if it answers false for a window that is genuinely
+blocked, a guest books a property that is out of service and nothing catches it.
+Task 12 depends on it, so its boundary behaviour is pinned here against real
+Postgres rather than a fake.
+
+```go
+package blockedslot
+
+import (
+	"context"
+	"database/sql"
+	"os"
+	"testing"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	migrate "github.com/rubenv/sql-migrate"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+
+	"github.com/johnquangdev/laverte-home/migrations"
+	"github.com/johnquangdev/laverte-home/model"
+)
+
+func setupTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+
+	sqlDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: migrations.FS, Root: "."}
+	if _, err = migrate.Exec(sqlDB, "postgres", src, migrate.Up); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	t.Cleanup(func() {
+		// Truncate rather than migrate-down: packages share this database, so
+		// tearing the schema out would break whichever test is running alongside.
+		if _, err := sqlDB.Exec("TRUNCATE blocked_slots, homes RESTART IDENTITY CASCADE"); err != nil {
+			t.Errorf("truncate: %v", err)
+		}
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close db: %v", err)
+		}
+	})
+
+	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("gorm open: %v", err)
+	}
+	return gormDB
+}
+
+// The window is half-open [start, end), matching the tstzrange default that
+// bookings' exclusion constraint uses. The two must agree: if this check refused a
+// window the booking constraint permits (or the reverse), back-to-back bookings and
+// maintenance windows would disagree about who owns the boundary minute.
+func TestHasOverlapBoundaries(t *testing.T) {
+	db := setupTestDB(t)
+	repo := NewPG(func(context.Context) *gorm.DB { return db })
+	ctx := context.Background()
+
+	blocked := &model.Home{Name: "Blocked Home", Category: model.HomeCategoryHome, IsActive: true}
+	other := &model.Home{Name: "Other Home", Category: model.HomeCategoryNest, IsActive: true}
+	if err := db.Create(blocked).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	if err := db.Create(other).Error; err != nil {
+		t.Fatalf("create other home: %v", err)
+	}
+
+	at := func(hour int) time.Time {
+		return time.Date(2026, 8, 1, hour, 0, 0, 0, time.UTC)
+	}
+	if err := repo.Create(ctx, &model.BlockedSlot{
+		HomeID: blocked.ID, StartTime: at(10), EndTime: at(12), Reason: "cleaning",
+	}); err != nil {
+		t.Fatalf("create blocked slot: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		homeID uint
+		start  time.Time
+		end    time.Time
+		want   bool
+	}{
+		{"ends exactly when the block starts", blocked.ID, at(8), at(10), false},
+		{"straddles the block's start", blocked.ID, at(9), at(11), true},
+		{"sits fully inside the block", blocked.ID, at(10), at(11), true},
+		{"fully contains the block", blocked.ID, at(9), at(13), true},
+		{"starts exactly when the block ends", blocked.ID, at(12), at(14), false},
+		{"entirely after the block", blocked.ID, at(13), at(15), false},
+		{"same window on a different home", other.ID, at(9), at(11), false},
+	}
+	for _, c := range cases {
+		got, err := repo.HasOverlap(ctx, c.homeID, c.start, c.end)
+		if err != nil {
+			t.Fatalf("%s: HasOverlap() error = %v", c.name, err)
+		}
+		if got != c.want {
+			t.Errorf("%s: HasOverlap() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Deleting an id that is not there must not report success: the admin would believe
+// the home is bookable again while HasOverlap keeps refusing the window.
+func TestDeleteUnknownIDReportsNotFound(t *testing.T) {
+	db := setupTestDB(t)
+	repo := NewPG(func(context.Context) *gorm.DB { return db })
+
+	if err := repo.Delete(context.Background(), 999999); err == nil {
+		t.Error("Delete() on an unknown id = nil error, want gorm.ErrRecordNotFound")
+	}
+}
+```
+
+- [ ] **Step 8c: Run the integration tests**
+
+Run: `TEST_DATABASE_URL=postgres://laverte:laverte@localhost:55432/laverte?sslmode=disable go test ./repository/blockedslot/... -v`
+Expected: PASS — all seven boundary cases and the unknown-id delete.
 
 - [ ] **Step 9: Write `usecase/blockedslot/usecase_test.go`**
 
