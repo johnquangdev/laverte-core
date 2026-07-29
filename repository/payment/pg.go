@@ -2,12 +2,18 @@ package payment
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
 	"github.com/johnquangdev/laverte-home/model"
 )
+
+// postgresUniqueViolation is the SQLSTATE Postgres raises when a unique index
+// rejects a row — here, uq_payments_sepay_transaction_ref.
+const postgresUniqueViolation = "23505"
 
 type pgRepository struct {
 	getDB func(context.Context) *gorm.DB
@@ -43,6 +49,10 @@ func (r *pgRepository) MarkPaidIfPending(ctx context.Context, paymentID uint, ex
 			"paid_at":               paidAt,
 		})
 	if result.Error != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(result.Error, &pgErr) && pgErr.Code == postgresUniqueViolation {
+			return false, ErrDuplicateExternalRef
+		}
 		return false, result.Error
 	}
 	return result.RowsAffected > 0, nil

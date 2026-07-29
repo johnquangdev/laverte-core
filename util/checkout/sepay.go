@@ -69,19 +69,25 @@ func parseBookingMemo(prefix, content string) string {
 		return ""
 	}
 	cleaned := alphanumUpper(content)
-	i := strings.Index(cleaned, cleanPrefix)
-	if i < 0 {
-		return ""
+
+	// Scan every occurrence, not just the first: bank memo text is free-form and can
+	// carry the prefix more than once (a payer note plus the QR's own memo), and
+	// stopping at the first one would miss the real booking id entirely.
+	for offset := 0; ; {
+		i := strings.Index(cleaned[offset:], cleanPrefix)
+		if i < 0 {
+			return ""
+		}
+		rest := cleaned[offset+i+len(cleanPrefix):]
+		end := 0
+		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+			end++
+		}
+		if end > 0 {
+			return cleanPrefix + rest[:end]
+		}
+		offset += i + len(cleanPrefix)
 	}
-	rest := cleaned[i+len(cleanPrefix):]
-	end := 0
-	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
-		end++
-	}
-	if end == 0 {
-		return ""
-	}
-	return cleanPrefix + rest[:end]
 }
 
 // CreateQR returns a URL-based QR renderer rather than a hand-rolled EMVCo
@@ -182,15 +188,20 @@ func (p *sepayProvider) VerifyWebhook(_ context.Context, raw []byte, headers htt
 		return nil, errors.New("sepay: malformed webhook payload")
 	}
 
-	if isSePayWebhookPing(payload) {
-		return nil, ErrWebhookPing
-	}
-
 	memo := parseBookingMemo(p.transferPrefix, payload.Code)
 	if memo == "" {
 		memo = parseBookingMemo(p.transferPrefix, payload.Content)
 	}
+
+	// Ping detection runs only when nothing parseable was found. The marker is a
+	// substring match on the same free-text field the memo comes from, so checking
+	// it first would silently discard a real settlement whose bank memo happened to
+	// contain the phrase — money received, booking never confirmed, nothing logged.
+	// A genuine settlement always carries a memo; the dashboard ping never does.
 	if memo == "" {
+		if isSePayWebhookPing(payload) {
+			return nil, ErrWebhookPing
+		}
 		return nil, errors.New("sepay: no recognizable booking memo in transfer content")
 	}
 
