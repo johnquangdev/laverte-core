@@ -113,3 +113,22 @@ func TestPhoneLimitSharesQuotaAcrossPhoneFormats(t *testing.T) {
 		t.Fatalf("second request (SAME number written as +84900000001, different IP) status = %d, want 429 — normalization must map both to one quota", rec2.Code)
 	}
 }
+
+// TestPhoneLimitSharesQuotaAcrossStrayLeadingZeros is the router-level guard for the
+// family NormalizeVNPhone had to be fixed to cover: "0900000001" and "084900000001"
+// look like different numbers unless the country-code/trunk-prefix stripping in
+// NormalizeVNPhone treats them as one, and a caller who adds a stray leading zero (or
+// two) before the country code previously got a fresh per-phone quota each time.
+func TestPhoneLimitSharesQuotaAcrossStrayLeadingZeros(t *testing.T) {
+	e := newRouterWithPhoneLimit(t, 1)
+
+	rec1 := doBookingRequest(e, "0900000001", "6.6.6.6:7777")
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request (phone 0900000001) status = %d, want 200, body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	rec2 := doBookingRequest(e, "084900000001", "7.7.7.7:8888")
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request (SAME number written as 084900000001, different IP) status = %d, want 429 — normalization must map both to one quota", rec2.Code)
+	}
+}

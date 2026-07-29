@@ -25,10 +25,13 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 	}
 
 	// Every phone-keyed lookup (re-use check, rate limiter, stored booking) must use
-	// one canonical form, or "0900000001"/"+84900000001"/"84900000001" count as three
-	// different callers and silently triple the intended per-phone quota.
+	// one canonical form, or the same number spelled differently counts as several
+	// different callers and silently multiplies the intended per-phone quota.
+	// NormalizeVNPhone returns "" for anything that cannot be a VN mobile number, so
+	// checking for that (rather than a length bound) can't accidentally accept a
+	// garbage string that happens to normalize to the right length.
 	phone := model.NormalizeVNPhone(req.CustomerPhone)
-	if len(phone) < 10 {
+	if phone == "" {
 		return nil, apperr.Validation("so dien thoai khong hop le")
 	}
 
