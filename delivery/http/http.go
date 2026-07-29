@@ -2,13 +2,28 @@ package http
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"go.uber.org/zap"
 
 	"github.com/johnquangdev/laverte-home/config"
+	adminhttp "github.com/johnquangdev/laverte-home/delivery/http/admin"
+	authhttp "github.com/johnquangdev/laverte-home/delivery/http/auth"
+	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
+	apperr "github.com/johnquangdev/laverte-home/errors"
+	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
+	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
+	"github.com/johnquangdev/laverte-home/util/ratelimit"
+	"github.com/johnquangdev/laverte-home/util/tokenstore"
 )
+
+type errBody struct {
+	Code    string `json:"code"`
+	CodeID  string `json:"code_id"`
+	Message string `json:"message"`
+}
 
 type Server struct {
 	echo *echo.Echo
@@ -16,9 +31,20 @@ type Server struct {
 	log  *zap.Logger
 }
 
-// NewServer builds the Echo instance with base middleware and /health only.
-// Task 6 rewrites it to take a Deps struct once there are route groups to mount.
-func NewServer(cfg config.Config, log *zap.Logger) *Server {
+// Deps carries what the router needs to mount its route groups. It is a struct
+// with named fields, not a positional parameter list, because nearly every
+// later task adds one more dependency here — a named field can be appended
+// without silently shifting the meaning of every existing call site.
+type Deps struct {
+	Limiter ratelimit.ILimiter
+	// TokenStore is read by JWTAuth to reject tokens Logout has revoked.
+	TokenStore        tokenstore.ITokenStore
+	AuthUC            authuc.IUseCase
+	AdminUC           adminuc.IUseCase
+	AdminRoleResolver jwtmw.AdminRoleResolver
+}
+
+func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	e := echo.New()
 	e.HideBanner = true
 	e.Use(middleware.Recover())
@@ -41,6 +67,29 @@ func NewServer(cfg config.Config, log *zap.Logger) *Server {
 	e.GET("/health", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]bool{"ok": true})
 	})
+
+	handleErr := func(c echo.Context, err error) error {
+		if e, ok := apperr.As(err); ok {
+			log.Error(e.Error())
+			return c.JSON(e.HTTPCode, errBody{Code: string(e.Code), CodeID: e.CodeID, Message: e.Message})
+		}
+		log.Error(err.Error())
+		ie := apperr.Internal(err)
+		return c.JSON(ie.HTTPCode, errBody{Code: string(ie.Code), CodeID: ie.CodeID, Message: ie.Message})
+	}
+	handleOK := func(c echo.Context, data any) error { return c.JSON(http.StatusOK, data) }
+
+	api := e.Group("/api/v1")
+	window := time.Minute
+	ipLimit := jwtmw.RateLimitByIP("public", deps.Limiter, cfg.RateLimitPublicPerMin, window)
+	userLimit := jwtmw.RateLimitByUser("authed", deps.Limiter, cfg.RateLimitAuthedPerMin, window)
+
+	authhttp.Init(api.Group("/auth", ipLimit), deps.AuthUC, handleErr, handleOK)
+
+	authed := api.Group("", jwtmw.JWTAuth(cfg, deps.TokenStore), userLimit)
+	requireAdmin := jwtmw.RequireAdmin(cfg, deps.AdminRoleResolver)
+	adminGroup := authed.Group("/admin", requireAdmin)
+	adminhttp.Init(adminGroup, deps.AdminUC, handleErr, handleOK, jwtmw.RequireSuperAdmin(cfg))
 
 	return &Server{echo: e, cfg: cfg, log: log}
 }
