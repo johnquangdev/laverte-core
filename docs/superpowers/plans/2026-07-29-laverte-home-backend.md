@@ -23,7 +23,11 @@
 - Repositories are always constructed as `NewPG(getDB func(context.Context) *gorm.DB) IRepository`.
 - Each `delivery/http/<domain>` package declares its own `HandleErrFunc`/`HandleOKFunc`. `delivery/http/admin` declares them once in Task 6 — later files added to that package must not redeclare them.
 - `docker-compose.dev.yml` provides local Postgres (with `btree_gist` available) + Redis. Integration tests read `TEST_DATABASE_URL` and SKIP when it is unset.
-- `go test` runs packages in parallel, so integration tests share the dev database concurrently. A test that drops or recreates schema must therefore create its own throwaway database (see `migrations/migrations_integration_test.go`); tests that only read and write rows share the dev database and clean up with `TRUNCATE`.
+- `go test` runs packages in parallel, so **every** DB integration test package gets its
+  own throwaway database via `internal/testdb`. Sharing one database does not work even
+  for row-level tests: two packages that both `TRUNCATE ... homes CASCADE` cascade into
+  each other's fixtures, which is deterministic failure, not flakiness. `migrations`
+  keeps its own bespoke setup because it is the one test that exercises Down.
 - Price changes never mutate a live `PricingRule` in place — they close it (`effective_to`, `is_active=false`) and insert a replacement, so the price a past booking was charged under stays reconstructible.
 
 ---
@@ -4843,6 +4847,119 @@ git commit -m "feat: PricingRule model + Compute pricing usecase + admin CRUD"
 
 ---
 
+### Task 9a: `internal/testdb` — one throwaway database per integration package
+
+**Files:**
+- Create: `internal/testdb/testdb.go`
+
+**Interfaces:**
+- Produces: `testdb.New(t testing.TB, suffix string) *gorm.DB` — creates a database
+  named `laverte_test_<suffix>`, migrates it to head, returns a GORM handle, and drops
+  it on cleanup.
+
+- [ ] **Step 1: Write `internal/testdb/testdb.go`**
+
+```go
+// Package testdb gives each integration test package its own database.
+//
+// Sharing one database across packages does not work: `go test` runs packages in
+// parallel, and two packages that both TRUNCATE a common parent table with CASCADE
+// wipe each other's fixtures mid-run. That is deterministic failure, not flakiness.
+// A database per package also means no cleanup statement to get wrong — the whole
+// database goes away.
+package testdb
+
+import (
+	"database/sql"
+	"net/url"
+	"os"
+	"testing"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	migrate "github.com/rubenv/sql-migrate"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+
+	"github.com/johnquangdev/laverte-home/migrations"
+)
+
+// New provisions laverte_test_<suffix>, migrated to head. It skips the test when
+// TEST_DATABASE_URL is unset, so unit-only runs need no database.
+func New(t testing.TB, suffix string) *gorm.DB {
+	t.Helper()
+
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	name := "laverte_test_" + suffix
+
+	// CREATE/DROP DATABASE cannot run while connected to the target, so issue them
+	// from the database the DSN already names.
+	admin, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("testdb: open admin: %v", err)
+	}
+	// Registered before the drop cleanup below so LIFO ordering closes admin last:
+	// a plain defer would run before t.Cleanup and the drop would find no connection.
+	t.Cleanup(func() {
+		if cerr := admin.Close(); cerr != nil {
+			t.Errorf("testdb: close admin: %v", cerr)
+		}
+	})
+
+	if _, err = admin.Exec("DROP DATABASE IF EXISTS " + name); err != nil {
+		t.Fatalf("testdb: drop stale %s: %v", name, err)
+	}
+	if _, err = admin.Exec("CREATE DATABASE " + name); err != nil {
+		t.Fatalf("testdb: create %s: %v", name, err)
+	}
+
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("testdb: parse dsn: %v", err)
+	}
+	u.Path = "/" + name
+	testDSN := u.String()
+
+	sqlDB, err := sql.Open("pgx", testDSN)
+	if err != nil {
+		t.Fatalf("testdb: open %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		// The database cannot be dropped while a connection to it is open.
+		if cerr := sqlDB.Close(); cerr != nil {
+			t.Errorf("testdb: close %s: %v", name, cerr)
+		}
+		if _, derr := admin.Exec("DROP DATABASE IF EXISTS " + name); derr != nil {
+			t.Errorf("testdb: drop %s: %v", name, derr)
+		}
+	})
+
+	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: migrations.FS, Root: "."}
+	if _, err = migrate.Exec(sqlDB, "postgres", src, migrate.Up); err != nil {
+		t.Fatalf("testdb: migrate %s: %v", name, err)
+	}
+
+	gormDB, err := gorm.Open(postgres.Open(testDSN), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("testdb: gorm open %s: %v", name, err)
+	}
+	return gormDB
+}
+```
+
+- [ ] **Step 2: Build and commit**
+
+```bash
+go build ./...
+go vet ./...
+git add internal/testdb
+git commit -m "test: give each integration package its own database"
+```
+
+---
+
 ### Task 9: Booking model, migration with exclusion constraint, repository with conflict detection
 
 **Files:**
@@ -5116,17 +5233,12 @@ package booking
 
 import (
 	"context"
-	"database/sql"
-	"os"
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-	migrate "github.com/rubenv/sql-migrate"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/migrations"
+	"github.com/johnquangdev/laverte-home/internal/testdb"
 	"github.com/johnquangdev/laverte-home/model"
 )
 
@@ -5138,36 +5250,9 @@ func expiresIn(d time.Duration) *time.Time {
 
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-
-	sqlDB, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: migrations.FS, Root: "."}
-	if _, err := migrate.Exec(sqlDB, "postgres", src, migrate.Up); err != nil {
-		t.Fatalf("migrate up: %v", err)
-	}
-	t.Cleanup(func() {
-		// Truncate rather than migrate-down: these tests share one database, so
-		// each needs a clean slate without tearing the schema out from under a
-		// sibling test.
-		if _, err := sqlDB.Exec("TRUNCATE bookings, homes RESTART IDENTITY CASCADE"); err != nil {
-			t.Errorf("truncate: %v", err)
-		}
-		if err := sqlDB.Close(); err != nil {
-			t.Errorf("close db: %v", err)
-		}
-	})
-
-	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("gorm open: %v", err)
-	}
-	return gormDB
+	// Own database per package: go test runs packages in parallel, and a shared
+	// database means one package's cleanup truncates another's fixtures mid-run.
+	return testdb.New(t, "booking")
 }
 
 func TestCreateRejectsOverlappingBookingForSameHome(t *testing.T) {
@@ -5619,51 +5704,20 @@ package blockedslot
 
 import (
 	"context"
-	"database/sql"
-	"os"
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-	migrate "github.com/rubenv/sql-migrate"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/migrations"
+	"github.com/johnquangdev/laverte-home/internal/testdb"
 	"github.com/johnquangdev/laverte-home/model"
 )
 
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-
-	sqlDB, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: migrations.FS, Root: "."}
-	if _, err = migrate.Exec(sqlDB, "postgres", src, migrate.Up); err != nil {
-		t.Fatalf("migrate up: %v", err)
-	}
-	t.Cleanup(func() {
-		// Truncate rather than migrate-down: packages share this database, so
-		// tearing the schema out would break whichever test is running alongside.
-		if _, err := sqlDB.Exec("TRUNCATE blocked_slots, homes RESTART IDENTITY CASCADE"); err != nil {
-			t.Errorf("truncate: %v", err)
-		}
-		if err := sqlDB.Close(); err != nil {
-			t.Errorf("close db: %v", err)
-		}
-	})
-
-	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("gorm open: %v", err)
-	}
-	return gormDB
+	// Own database per package: go test runs packages in parallel, and a shared
+	// database means one package's cleanup truncates another's fixtures mid-run.
+	return testdb.New(t, "blockedslot")
 }
 
 // The window is half-open [start, end), matching the tstzrange default that
@@ -6203,52 +6257,20 @@ package payment
 
 import (
 	"context"
-	"database/sql"
-	"os"
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-	migrate "github.com/rubenv/sql-migrate"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/migrations"
+	"github.com/johnquangdev/laverte-home/internal/testdb"
 	"github.com/johnquangdev/laverte-home/model"
 )
 
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-
-	sqlDB, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: migrations.FS, Root: "."}
-	if _, err := migrate.Exec(sqlDB, "postgres", src, migrate.Up); err != nil {
-		t.Fatalf("migrate up: %v", err)
-	}
-	t.Cleanup(func() {
-		// Truncate rather than migrate-down: these tests share one database, so
-		// each needs a clean slate without tearing the schema out from under a
-		// sibling test.
-		if _, err := sqlDB.Exec("TRUNCATE payments, bookings, homes RESTART IDENTITY CASCADE"); err != nil {
-			t.Errorf("truncate: %v", err)
-		}
-		if err := sqlDB.Close(); err != nil {
-			t.Errorf("close db: %v", err)
-		}
-	})
-
-	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("gorm open: %v", err)
-	}
-	return gormDB
+	// Own database per package: go test runs packages in parallel, and a shared
+	// database means one package's cleanup truncates another's fixtures mid-run.
+	return testdb.New(t, "payment")
 }
 
 // seedPendingPayment inserts the home+booking rows the payments FK requires,
