@@ -61,6 +61,16 @@ func (stubPricingAdminUC) ListByCategory(context.Context, string) ([]presenter.P
 	return nil, nil
 }
 
+type stubBlockedSlotUC struct{}
+
+func (stubBlockedSlotUC) Create(context.Context, payload.CreateBlockedSlotRequest, uint) (*presenter.BlockedSlotResponse, error) {
+	return nil, nil
+}
+func (stubBlockedSlotUC) Delete(context.Context, uint) error { return nil }
+func (stubBlockedSlotUC) ListByHome(context.Context, uint) ([]presenter.BlockedSlotResponse, error) {
+	return nil, nil
+}
+
 // stubTokenStore reports nothing revoked, so router tests need no Redis.
 type stubTokenStore struct{}
 
@@ -80,6 +90,7 @@ func newTestServer() *Server {
 		AdminRoleResolver: jwtmw.AdminRoleResolverFunc(func(context.Context, uint) (string, error) { return "", nil }),
 		HomeAdminUC:       stubHomeAdminUC{},
 		PricingAdminUC:    stubPricingAdminUC{},
+		BlockedSlotUC:     stubBlockedSlotUC{},
 	})
 }
 
@@ -111,6 +122,7 @@ func TestAdminHomeCreateRejectsEmptyBody(t *testing.T) {
 		AdminRoleResolver: jwtmw.AdminRoleResolverFunc(func(context.Context, uint) (string, error) { return "", nil }),
 		HomeAdminUC:       stubHomeAdminUC{},
 		PricingAdminUC:    stubPricingAdminUC{},
+		BlockedSlotUC:     stubBlockedSlotUC{},
 	})
 
 	token, err := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7}, time.Hour)

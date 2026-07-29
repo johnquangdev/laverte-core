@@ -13,12 +13,14 @@ import (
 	httpserver "github.com/johnquangdev/laverte-home/delivery/http"
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
 	"github.com/johnquangdev/laverte-home/migrations"
+	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
 	homerepo "github.com/johnquangdev/laverte-home/repository/home"
 	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricingrule"
 	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refreshtoken"
 	userrepo "github.com/johnquangdev/laverte-home/repository/user"
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
+	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
 	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-home/util/oauth"
@@ -43,6 +45,7 @@ func main() {
 	homes := homerepo.NewPG(dbFactory)
 	// pricingRules also backs the booking usecase's pricinguc.New(pricingRules).
 	pricingRules := pricingrulerepo.NewPG(dbFactory)
+	blockedSlots := blockedslotrepo.NewPG(dbFactory)
 
 	oauthSvc := oauth.NewGoogle(cfg)
 	tokenStore := tokenstore.NewRedis(cfg)
@@ -52,6 +55,7 @@ func main() {
 	adminUC := adminuc.New(users)
 	homeAdminUC := homeadminuc.New(homes)
 	pricingAdminUC := pricingadminuc.New(pricingRules)
+	blockedSlotUC := blockedslotuc.New(blockedSlots)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
 		u, err := users.GetByID(ctx, userID)
@@ -69,6 +73,7 @@ func main() {
 		AdminRoleResolver: adminRoleResolver,
 		HomeAdminUC:       homeAdminUC,
 		PricingAdminUC:    pricingAdminUC,
+		BlockedSlotUC:     blockedSlotUC,
 	})
 	log.Info("starting server", zap.String("port", cfg.Port))
 	if err := srv.Start(); err != nil {
