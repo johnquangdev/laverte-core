@@ -1048,18 +1048,18 @@ git commit -m "feat: port Redis + in-memory rate limiter from lumen"
 **Files:**
 - Create: `util/jwt.go`
 - Create: `util/jwt_test.go`
-- Create: `util/token_store/interface.go`
-- Create: `util/token_store/redis.go`
+- Create: `util/tokenstore/interface.go`
+- Create: `util/tokenstore/redis.go`
 - Create: `util/oauth/interface.go`
 - Create: `util/oauth/google.go`
 - Modify: `config/config.go` — none needed, fields already present from Task 1.
 
 **Interfaces:**
 - Produces: `util.Claims{UserID uint, TokenID string, FamilyID string, jwt.RegisteredClaims}`, `util.GenerateToken(secret string, claims Claims, ttl time.Duration) (string, error)`, `util.ParseToken(secret, tokenStr string) (*Claims, error)`.
-- Produces: `token_store.ITokenStore` with `SaveState`, `ValidateState`, `BlacklistToken`, `IsBlacklisted`; `token_store.NewRedis(cfg *config.Config) ITokenStore`.
+- Produces: `tokenstore.ITokenStore` with `SaveState`, `ValidateState`, `BlacklistToken`, `IsBlacklisted`; `tokenstore.NewRedis(cfg *config.Config) ITokenStore`.
 - Produces: `oauth.IOAuthProvider` with `AuthorizeURL(ctx) (AuthorizeURLResult, error)`, `Exchange(ctx, code, state string) (ExchangeResult, error)`; `oauth.NewGoogle(cfg *config.Config) IOAuthProvider`.
 
-This is a direct port of lumen's `util/jwt.go`, `util/token_store`, `util/oauth` — unchanged logic, only the import path changes.
+This is a direct port of lumen's `util/jwt.go`, `util/tokenstore`, `util/oauth` — unchanged logic, only the import path changes.
 
 - [ ] **Step 1: Write `util/jwt.go`**
 
@@ -1149,10 +1149,10 @@ func TestParseTokenRejectsExpired(t *testing.T) {
 Run: `go test ./util/... -run TestGenerateAndParseToken -v && go test ./util/... -run TestParseToken -v`
 Expected: PASS
 
-- [ ] **Step 4: Write `util/token_store/interface.go`**
+- [ ] **Step 4: Write `util/tokenstore/interface.go`**
 
 ```go
-package token_store
+package tokenstore
 
 import "context"
 
@@ -1165,10 +1165,10 @@ type ITokenStore interface {
 }
 ```
 
-- [ ] **Step 5: Write `util/token_store/redis.go`**
+- [ ] **Step 5: Write `util/tokenstore/redis.go`**
 
 ```go
-package token_store
+package tokenstore
 
 import (
 	"context"
@@ -1184,7 +1184,7 @@ type redisStore struct{ client *redis.Client }
 func NewRedis(cfg *config.Config) ITokenStore {
 	opt, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
-		panic("util/token_store/redis: " + err.Error())
+		panic("util/tokenstore/redis: " + err.Error())
 	}
 	return &redisStore{client: redis.NewClient(opt)}
 }
@@ -1325,8 +1325,8 @@ git commit -m "feat: port JWT util, Redis token store, Google OAuth from lumen"
 - Create: `model/role.go`
 - Create: `repository/user/interface.go`
 - Create: `repository/user/pg.go`
-- Create: `repository/refresh_token/interface.go`
-- Create: `repository/refresh_token/pg.go`
+- Create: `repository/refreshtoken/interface.go`
+- Create: `repository/refreshtoken/pg.go`
 - Create: `delivery/http/middleware/jwt_auth.go`
 - Create: `delivery/http/middleware/jwt_auth_test.go`
 - Create: `delivery/http/middleware/require_admin.go`
@@ -1466,10 +1466,10 @@ func (r *pgRepository) SetRole(ctx context.Context, userID uint, role string, gr
 }
 ```
 
-- [ ] **Step 5: Write `repository/refresh_token/interface.go`**
+- [ ] **Step 5: Write `repository/refreshtoken/interface.go`**
 
 ```go
-package refresh_token
+package refreshtoken
 
 import (
 	"context"
@@ -1485,10 +1485,10 @@ type IRepository interface {
 }
 ```
 
-- [ ] **Step 6: Write `repository/refresh_token/pg.go`**
+- [ ] **Step 6: Write `repository/refreshtoken/pg.go`**
 
 ```go
-package refresh_token
+package refreshtoken
 
 import (
 	"context"
@@ -1900,7 +1900,7 @@ func TestRateLimitByPhoneFallsBackToIP(t *testing.T) {
 go test ./... 
 go build ./...
 go vet ./...
-git add model repository/user repository/refresh_token delivery/http/middleware
+git add model repository/user repository/refreshtoken delivery/http/middleware
 git commit -m "feat: user/refresh_token model+repo, JWT/admin/rate-limit middleware"
 ```
 
@@ -1927,7 +1927,7 @@ git commit -m "feat: user/refresh_token model+repo, JWT/admin/rate-limit middlew
 - Modify: `cmd/main.go` — construct repos/usecases/oauth/token-store/limiter and pass them in a `httpserver.Deps` literal
 
 **Interfaces:**
-- Consumes: `userrepo.IRepository`, `refreshtokenrepo.IRepository` (Task 5); `oauth.IOAuthProvider`, `token_store.ITokenStore` (Task 4); `util.GenerateToken/ParseToken` (Task 4).
+- Consumes: `userrepo.IRepository`, `refreshtokenrepo.IRepository` (Task 5); `oauth.IOAuthProvider`, `tokenstore.ITokenStore` (Task 4); `util.GenerateToken/ParseToken` (Task 4).
 - Produces: `authuc.IUseCase` (`LoginURL`, `Callback`, `RefreshToken`, `Logout`); `presenter.SessionResponse{AccessToken, RefreshToken, ExpiresIn, TokenType, User}`; `adminuc.IUseCase` (`ListAdmins`, `GrantAdmin`, `RevokeAdmin`).
 
 - [ ] **Step 1: Write `payload/auth.go`**
@@ -2013,18 +2013,18 @@ import (
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/payload"
 	"github.com/johnquangdev/laverte-home/presenter"
-	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refresh_token"
+	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refreshtoken"
 	userrepo "github.com/johnquangdev/laverte-home/repository/user"
 	"github.com/johnquangdev/laverte-home/util"
 	"github.com/johnquangdev/laverte-home/util/oauth"
-	"github.com/johnquangdev/laverte-home/util/token_store"
+	"github.com/johnquangdev/laverte-home/util/tokenstore"
 )
 
 type UseCase struct {
 	userRepo   userrepo.IRepository
 	tokenRepo  refreshtokenrepo.IRepository
 	oauth      oauth.IOAuthProvider
-	tokenStore token_store.ITokenStore
+	tokenStore tokenstore.ITokenStore
 	cfg        config.Config
 }
 
@@ -2032,7 +2032,7 @@ func New(
 	userRepo userrepo.IRepository,
 	tokenRepo refreshtokenrepo.IRepository,
 	oauthSvc oauth.IOAuthProvider,
-	tokenStore token_store.ITokenStore,
+	tokenStore tokenstore.ITokenStore,
 	cfg config.Config,
 ) IUseCase {
 	return &UseCase{userRepo: userRepo, tokenRepo: tokenRepo, oauth: oauthSvc, tokenStore: tokenStore, cfg: cfg}
@@ -2156,7 +2156,7 @@ import (
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/util"
 	"github.com/johnquangdev/laverte-home/util/oauth"
-	"github.com/johnquangdev/laverte-home/util/token_store"
+	"github.com/johnquangdev/laverte-home/util/tokenstore"
 )
 
 type fakeUserRepo struct{ users map[uint]*model.User }
@@ -2236,7 +2236,7 @@ func TestRefreshTokenReuseRevokesFamily(t *testing.T) {
 }
 
 var _ = oauth.IOAuthProvider(nil)
-var _ = token_store.ITokenStore(nil)
+var _ = tokenstore.ITokenStore(nil)
 ```
 
 - [ ] **Step 6: Run test to verify it passes**
@@ -2720,13 +2720,13 @@ import (
 	httpserver "github.com/johnquangdev/laverte-home/delivery/http"
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
 	"github.com/johnquangdev/laverte-home/migrations"
-	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refresh_token"
+	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refreshtoken"
 	userrepo "github.com/johnquangdev/laverte-home/repository/user"
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
 	"github.com/johnquangdev/laverte-home/util/oauth"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
-	"github.com/johnquangdev/laverte-home/util/token_store"
+	"github.com/johnquangdev/laverte-home/util/tokenstore"
 )
 
 func main() {
@@ -2745,7 +2745,7 @@ func main() {
 	tokens := refreshtokenrepo.NewPG(dbFactory)
 
 	oauthSvc := oauth.NewGoogle(cfg)
-	tokenStore := token_store.NewRedis(cfg)
+	tokenStore := tokenstore.NewRedis(cfg)
 	limiter := ratelimit.NewRedis(cfg)
 
 	authUC := authuc.New(users, tokens, oauthSvc, tokenStore, *cfg)
@@ -3278,8 +3278,8 @@ git commit -m "feat: Home model + admin CRUD"
 **Files:**
 - Create: `model/pricing_rule.go`
 - Create: `migrations/0003_pricing_rules.sql`
-- Create: `repository/pricing_rule/interface.go`
-- Create: `repository/pricing_rule/pg.go`
+- Create: `repository/pricingrule/interface.go`
+- Create: `repository/pricingrule/pg.go`
 - Create: `usecase/pricing/interface.go`
 - Create: `usecase/pricing/usecase.go`
 - Create: `usecase/pricing/usecase_test.go`
@@ -3359,10 +3359,10 @@ CREATE INDEX idx_pricing_rules_category_type ON pricing_rules(category, rule_typ
 DROP TABLE pricing_rules;
 ```
 
-- [ ] **Step 3: Write `repository/pricing_rule/interface.go`**
+- [ ] **Step 3: Write `repository/pricingrule/interface.go`**
 
 ```go
-package pricing_rule
+package pricingrule
 
 import (
 	"context"
@@ -3381,10 +3381,10 @@ type IRepository interface {
 }
 ```
 
-- [ ] **Step 4: Write `repository/pricing_rule/pg.go`**
+- [ ] **Step 4: Write `repository/pricingrule/pg.go`**
 
 ```go
-package pricing_rule
+package pricingrule
 
 import (
 	"context"
@@ -3452,7 +3452,7 @@ import (
 
 	apperr "github.com/johnquangdev/laverte-home/errors"
 	"github.com/johnquangdev/laverte-home/model"
-	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricing_rule"
+	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricingrule"
 )
 
 type UseCase struct{ repo pricingrulerepo.IRepository }
@@ -3729,7 +3729,7 @@ import (
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/payload"
 	"github.com/johnquangdev/laverte-home/presenter"
-	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricing_rule"
+	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricingrule"
 )
 
 type UseCase struct{ repo pricingrulerepo.IRepository }
@@ -4063,7 +4063,7 @@ Add `PricingAdminUC: pricingAdminUC,` to the `httpserver.Deps{...}` literal, plu
 go build ./...
 go vet ./...
 go test ./...
-git add model/pricing_rule.go migrations/0003_pricing_rules.sql repository/pricing_rule usecase/pricing usecase/pricingadmin payload/pricing_rule.go presenter/pricing_rule.go delivery/http cmd/main.go
+git add model/pricing_rule.go migrations/0003_pricing_rules.sql repository/pricingrule usecase/pricing usecase/pricingadmin payload/pricing_rule.go presenter/pricing_rule.go delivery/http cmd/main.go
 git commit -m "feat: PricingRule model + Compute pricing usecase + admin CRUD"
 ```
 
@@ -4472,8 +4472,8 @@ git commit -m "feat: Booking model + exclusion-constraint-backed repository"
 **Files:**
 - Create: `model/blocked_slot.go`
 - Create: `migrations/0005_blocked_slots.sql`
-- Create: `repository/blocked_slot/interface.go`
-- Create: `repository/blocked_slot/pg.go`
+- Create: `repository/blockedslot/interface.go`
+- Create: `repository/blockedslot/pg.go`
 - Create: `payload/blocked_slot.go`
 - Create: `presenter/blocked_slot.go`
 - Create: `usecase/blockedslot/interface.go`
@@ -4483,7 +4483,7 @@ git commit -m "feat: Booking model + exclusion-constraint-backed repository"
 - Create: `delivery/http/admin/blocked_slot_route.go`
 - Modify: `delivery/http/http.go` — add a `BlockedSlotUC` field to `Deps`, mount `InitBlockedSlots`
 - Modify: `delivery/http/http_test.go` — add the stub usecase the new param needs
-- Modify: `cmd/main.go` — wire `repository/blocked_slot` + `usecase/blockedslot`
+- Modify: `cmd/main.go` — wire `repository/blockedslot` + `usecase/blockedslot`
 
 **Interfaces:**
 - Consumes: `middleware.ClaimsFromContext` (Task 5); `HandleErrFunc`/`HandleOKFunc` already declared in package `delivery/http/admin` (Task 6) — do NOT redeclare them.
@@ -4533,10 +4533,10 @@ CREATE INDEX idx_blocked_slots_home_id ON blocked_slots(home_id);
 DROP TABLE blocked_slots;
 ```
 
-- [ ] **Step 3: Write `repository/blocked_slot/interface.go`**
+- [ ] **Step 3: Write `repository/blockedslot/interface.go`**
 
 ```go
-package blocked_slot
+package blockedslot
 
 import (
 	"context"
@@ -4555,10 +4555,10 @@ type IRepository interface {
 }
 ```
 
-- [ ] **Step 4: Write `repository/blocked_slot/pg.go`**
+- [ ] **Step 4: Write `repository/blockedslot/pg.go`**
 
 ```go
-package blocked_slot
+package blockedslot
 
 import (
 	"context"
@@ -4670,7 +4670,7 @@ import (
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/payload"
 	"github.com/johnquangdev/laverte-home/presenter"
-	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blocked_slot"
+	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
 )
 
 type UseCase struct{ repo blockedslotrepo.IRepository }
@@ -4969,7 +4969,7 @@ and add `BlockedSlotUC: stubBlockedSlotUC{},` to the `Deps` literal inside `newT
 Add to the import block:
 
 ```go
-	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blocked_slot"
+	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
 	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
 ```
 
@@ -4993,7 +4993,7 @@ Expected: PASS — `TestMigrationsApplyCleanly` now walks 0001→0005 up then al
 go build ./...
 go vet ./...
 go test ./...
-git add model/blocked_slot.go migrations/0005_blocked_slots.sql repository/blocked_slot payload/blocked_slot.go presenter/blocked_slot.go usecase/blockedslot delivery/http cmd/main.go
+git add model/blocked_slot.go migrations/0005_blocked_slots.sql repository/blockedslot payload/blocked_slot.go presenter/blocked_slot.go usecase/blockedslot delivery/http cmd/main.go
 git commit -m "feat: BlockedSlot model + repository with HasOverlap + admin CRUD"
 ```
 
@@ -5841,7 +5841,7 @@ package booking
 
 import (
 	"github.com/johnquangdev/laverte-home/config"
-	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blocked_slot"
+	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
 	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
 	homerepo "github.com/johnquangdev/laverte-home/repository/home"
 	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
@@ -6443,7 +6443,7 @@ and add `BookingUC: stubBookingUC{},` to the `Deps` literal inside `newTestServe
 Add to the import block:
 
 ```go
-	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blocked_slot"
+	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
 	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
 	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
 	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
@@ -8218,7 +8218,7 @@ import (
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/payload"
 	"github.com/johnquangdev/laverte-home/presenter"
-	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blocked_slot"
+	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
 	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
 	homerepo "github.com/johnquangdev/laverte-home/repository/home"
 	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
