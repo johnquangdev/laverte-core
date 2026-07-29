@@ -9427,14 +9427,7 @@ with this block, and add `"net/http"` and `"time"` to the import block if they a
 	// Both channels are required together: sending the guest's ZNS while the
 	// admin alert has nowhere to go (or the reverse) hides a misconfiguration
 	// behind half-working notifications, so a partial setup stays on the noop.
-	var notifier = notify.NewNoop()
-	if cfg.ZNSAccessToken != "" && cfg.SMTPHost != "" {
-		notifier = notify.NewComposite(notify.NewZNS(cfg, &http.Client{Timeout: 10 * time.Second}), notify.NewSMTPAdmin(cfg))
-	} else {
-		log.Warn("notifications disabled",
-			zap.Bool("zns_configured", cfg.ZNSAccessToken != ""),
-			zap.Bool("smtp_configured", cfg.SMTPHost != ""))
-	}
+	notifier := notify.FromConfig(cfg, log)
 ```
 
 `notifier` then replaces `notify.NewNoop()` in the same billing-usecase call Task 14's Step 5 already touched — every other argument unchanged:
@@ -9442,6 +9435,92 @@ with this block, and add `"net/http"` and `"time"` to the import block if they a
 ```go
 	billingUC := billinguc.New(bookings, payments, sepay, notifier, calendarSvc, homes, log, *cfg)
 ```
+
+- [ ] **Step 7b: Write `util/notify/fromconfig.go`**
+
+The choice between the real composite and the no-op belongs here, not in
+`cmd/main.go`: a guard in `main` cannot be tested, and loosening it from `&&` to
+`||` leaves the whole suite green while shipping half-working notifications.
+
+```go
+package notify
+
+import (
+	"net/http"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/johnquangdev/laverte-home/config"
+)
+
+// znsTimeout bounds a ZNS call. Notification is best-effort and called inline from
+// the webhook, so a hung provider must not hold the request open.
+const znsTimeout = 10 * time.Second
+
+// FromConfig returns the real two-channel notifier, or the no-op when either
+// channel is unconfigured.
+//
+// Both or neither, deliberately. A half-configured environment — guests messaged
+// but the admin alert going nowhere, or the reverse — hides a misconfiguration
+// behind apparently-working behaviour, and the lock-code flow depends on the admin
+// alert arriving. Returning the no-op makes the gap visible in the boot log instead.
+func FromConfig(cfg *config.Config, log *zap.Logger) INotifier {
+	znsReady := cfg.ZNSAccessToken != ""
+	smtpReady := cfg.SMTPHost != ""
+	if znsReady && smtpReady {
+		return NewComposite(NewZNS(cfg, &http.Client{Timeout: znsTimeout}), NewSMTPAdmin(cfg))
+	}
+	log.Warn("notifications disabled",
+		zap.Bool("zns_configured", znsReady),
+		zap.Bool("smtp_configured", smtpReady))
+	return NewNoop()
+}
+```
+
+- [ ] **Step 7c: Write `util/notify/fromconfig_test.go`**
+
+```go
+package notify
+
+import (
+	"testing"
+
+	"go.uber.org/zap"
+
+	"github.com/johnquangdev/laverte-home/config"
+)
+
+// Half-configured must stay silent: shipping guest messages with no admin alert
+// (or the reverse) looks like it works and hides the misconfiguration.
+func TestFromConfigRequiresBothChannels(t *testing.T) {
+	cases := []struct {
+		name      string
+		zns, smtp string
+		wantReal  bool
+	}{
+		{"both configured", "token", "smtp.example.com", true},
+		{"only zns", "token", "", false},
+		{"only smtp", "", "smtp.example.com", false},
+		{"neither", "", "", false},
+	}
+	for _, c := range cases {
+		cfg := &config.Config{ZNSAccessToken: c.zns, SMTPHost: c.smtp}
+		got := FromConfig(cfg, zap.NewNop())
+		_, isNoop := got.(noopNotifier)
+		if c.wantReal && isNoop {
+			t.Errorf("%s: got the no-op, want the real notifier", c.name)
+		}
+		if !c.wantReal && !isNoop {
+			t.Errorf("%s: got the real notifier, want the no-op", c.name)
+		}
+	}
+}
+```
+
+Check what `NewNoop` actually returns before writing that type assertion — if the
+no-op is a pointer type or has a different name, match it rather than changing the
+no-op to suit the test.
 
 - [ ] **Step 8: Build, vet, commit**
 
