@@ -785,16 +785,19 @@ func TestMigrationsApplyCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open admin db: %v", err)
 	}
-	defer func() {
+	// Registered before the db-drop cleanup below so LIFO ordering closes admin
+	// last: a plain defer would run at function return, before t.Cleanup fires,
+	// closing admin while the drop-test-db cleanup still needs it.
+	t.Cleanup(func() {
 		if cerr := admin.Close(); cerr != nil {
 			t.Errorf("close admin db: %v", cerr)
 		}
-	}()
+	})
 
-	if _, err := admin.Exec("DROP DATABASE IF EXISTS " + migrationTestDB); err != nil {
+	if _, err = admin.Exec("DROP DATABASE IF EXISTS " + migrationTestDB); err != nil {
 		t.Fatalf("drop stale test db: %v", err)
 	}
-	if _, err := admin.Exec("CREATE DATABASE " + migrationTestDB); err != nil {
+	if _, err = admin.Exec("CREATE DATABASE " + migrationTestDB); err != nil {
 		t.Fatalf("create test db: %v", err)
 	}
 
