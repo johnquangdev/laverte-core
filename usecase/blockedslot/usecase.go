@@ -2,6 +2,9 @@ package blockedslot
 
 import (
 	"context"
+	"errors"
+
+	"gorm.io/gorm"
 
 	apperr "github.com/johnquangdev/laverte-home/errors"
 	"github.com/johnquangdev/laverte-home/model"
@@ -31,6 +34,9 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBlockedSlotRequ
 
 func (uc *UseCase) Delete(ctx context.Context, id uint) error {
 	if err := uc.repo.Delete(ctx, id); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apperr.NotFound(err)
+		}
 		return apperr.Internal(err)
 	}
 	return nil

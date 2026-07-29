@@ -20,7 +20,17 @@ func (r *pgRepository) Create(ctx context.Context, s *model.BlockedSlot) error {
 }
 
 func (r *pgRepository) Delete(ctx context.Context, id uint) error {
-	return r.getDB(ctx).Delete(&model.BlockedSlot{}, id).Error
+	res := r.getDB(ctx).Delete(&model.BlockedSlot{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	// Reporting success for an id that was never there would tell the admin the
+	// home is bookable again while HasOverlap — which has no DB constraint behind
+	// it — goes on refusing bookings for the window they meant to clear.
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 func (r *pgRepository) ListByHome(ctx context.Context, homeID uint) ([]*model.BlockedSlot, error) {
