@@ -8003,7 +8003,12 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 
 	booking, err := uc.bookingRepo.GetByID(ctx, bookingID)
 	if err != nil {
-		return apperr.NotFound(err)
+		// Distinguish a genuinely unknown booking from an infra failure: reporting a
+		// connection drop as "not found" hides outages in the logs.
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apperr.NotFound(err)
+		}
+		return apperr.Internal(err)
 	}
 
 	// The provider redelivers until it gets a 200, so an already-confirmed
@@ -8020,7 +8025,10 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 
 	payment, err := uc.paymentRepo.GetByBookingID(ctx, booking.ID)
 	if err != nil {
-		return apperr.NotFound(err)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return apperr.NotFound(err)
+		}
+		return apperr.Internal(err)
 	}
 	marked, err := uc.paymentRepo.MarkPaidIfPending(ctx, payment.ID, event.ExternalRef, time.Now())
 	if err != nil {
@@ -8035,13 +8043,39 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 		}
 		return apperr.Internal(err)
 	}
-	// Lost the race to a concurrent delivery that already settled this payment.
 	if !marked {
-		return nil
+		// The payment was already settled. Two things reach here: a concurrent
+		// delivery that won the race, or a delivery whose booking update failed
+		// after settlement — which would otherwise strand the booking at
+		// pending_payment forever, because every later redelivery also finds the
+		// payment already paid and, before this branch existed, returned success.
+		//
+		// Re-read to tell them apart. Confirmed means the winner finished, so there
+		// is nothing to do. Still pending means we are recovering, and SePay's own
+		// retry is the recovery mechanism — fall through and finish the job.
+		fresh, ferr := uc.bookingRepo.GetByID(ctx, booking.ID)
+		if ferr != nil {
+			return apperr.Internal(ferr)
+		}
+		if fresh.Status != model.BookingStatusPendingPayment {
+			return nil
+		}
+		uc.log.Warn("recovering a settled payment whose booking was never confirmed",
+			zap.Uint("booking_id", booking.ID),
+			zap.Uint("payment_id", payment.ID),
+			zap.String("external_ref", event.ExternalRef))
+		booking = fresh
 	}
 
 	booking.Status = model.BookingStatusConfirmed
 	if err := uc.bookingRepo.Update(ctx, booking); err != nil {
+		// The money is already settled, so this must be findable by hand: handleErr
+		// logs only the message, with no identifiers.
+		uc.log.Error("payment settled but the booking could not be confirmed",
+			zap.Uint("booking_id", booking.ID),
+			zap.Uint("payment_id", payment.ID),
+			zap.String("external_ref", event.ExternalRef),
+			zap.Error(err))
 		return apperr.Internal(err)
 	}
 
