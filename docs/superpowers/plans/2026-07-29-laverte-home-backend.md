@@ -228,6 +228,7 @@ const (
 	CodeAmountMismatch Code = "PAYMENT_AMOUNT_MISMATCH"
 	CodeValidation     Code = "VALIDATION_ERROR"
 	CodeUnauthorized   Code = "UNAUTHORIZED"
+	CodeConflict       Code = "CONFLICT"
 )
 
 type Error struct {
@@ -270,6 +271,13 @@ func Validation(msg string) *Error {
 
 func Unauthorized(raw error) *Error {
 	return &Error{Code: CodeUnauthorized, CodeID: "unauthorized", HTTPCode: http.StatusUnauthorized, Message: "chua dang nhap", Raw: raw}
+}
+
+// Conflict is for a request that collides with existing state the caller can see
+// and fix — "this already exists" — as opposed to SlotConflict, which is
+// specifically a booking overlapping another booking.
+func Conflict(raw error, msg string) *Error {
+	return &Error{Code: CodeConflict, CodeID: "conflict", HTTPCode: http.StatusConflict, Message: msg, Raw: raw}
 }
 
 func SlotConflict(raw error) *Error {
@@ -3841,10 +3849,17 @@ package pricingrule
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/johnquangdev/laverte-home/model"
 )
+
+// ErrActiveRuleExists is returned by Create when the partial unique index rejects
+// a second active rule for one category+rule_type. Superseding an existing rule is
+// the supported way to change a price; creating a duplicate is a caller mistake,
+// not a server fault.
+var ErrActiveRuleExists = errors.New("pricingrule: an active rule already exists for this category and type")
 
 type IRepository interface {
 	Create(ctx context.Context, r *model.PricingRule) error
@@ -3878,8 +3893,20 @@ type pgRepository struct{ getDB func(context.Context) *gorm.DB }
 
 func NewPG(getDB func(context.Context) *gorm.DB) IRepository { return &pgRepository{getDB} }
 
+// postgresUniqueViolation is the SQLSTATE Postgres raises when a unique index
+// rejects a row — here, idx_pricing_rules_one_active.
+const postgresUniqueViolation = "23505"
+
 func (r *pgRepository) Create(ctx context.Context, rule *model.PricingRule) error {
-	return r.getDB(ctx).Create(rule).Error
+	err := r.getDB(ctx).Create(rule).Error
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == postgresUniqueViolation {
+		return ErrActiveRuleExists
+	}
+	return err
 }
 
 func (r *pgRepository) Supersede(ctx context.Context, oldID uint, replacement *model.PricingRule, at time.Time) error {
@@ -4413,6 +4440,9 @@ func (uc *UseCase) Create(ctx context.Context, req payload.UpsertPricingRuleRequ
 		FlatPrice: req.FlatPrice, EffectiveFrom: time.Now(), IsActive: true,
 	}
 	if err := uc.repo.Create(ctx, r); err != nil {
+		if errors.Is(err, pricingrulerepo.ErrActiveRuleExists) {
+			return nil, apperr.Conflict(err, "hang nay da co bang gia dang ap dung cho loai nay — dung PUT de doi gia")
+		}
 		return nil, apperr.Internal(err)
 	}
 	resp := presenter.ToPricingRuleResponse(r)
@@ -4476,9 +4506,12 @@ import (
 )
 
 type fakeRepo struct {
-	byID    map[uint]*model.PricingRule
-	created []*model.PricingRule
-	nextID  uint
+	byID map[uint]*model.PricingRule
+	// createErr lets a test drive the duplicate-active-rule path the partial
+	// unique index produces in Postgres.
+	createErr error
+	created   []*model.PricingRule
+	nextID    uint
 }
 
 func newFakeRepo() *fakeRepo {
@@ -4486,6 +4519,9 @@ func newFakeRepo() *fakeRepo {
 }
 
 func (f *fakeRepo) Create(_ context.Context, r *model.PricingRule) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
 	f.nextID++
 	r.ID = f.nextID
 	f.byID[r.ID] = r
@@ -4559,6 +4595,23 @@ func TestSupersedeClosesOldRuleAndCreatesReplacement(t *testing.T) {
 	}
 	if *old.BasePrice != 200000 {
 		t.Errorf("old rule BasePrice = %d, want it left at 200000", *old.BasePrice)
+	}
+}
+
+// A duplicate Create is a caller mistake the admin can fix, so it must answer 409
+// with an actionable message — not the 500 a raw unique-violation would produce.
+func TestCreateDuplicateActiveRuleIsConflict(t *testing.T) {
+	repo := newFakeRepo()
+	repo.createErr = pricingrulerepo.ErrActiveRuleExists
+	uc := New(repo)
+
+	_, err := uc.Create(context.Background(), hourlyReq(200000))
+	e, ok := apperr.As(err)
+	if !ok {
+		t.Fatalf("error = %v, want an *apperr.Error", err)
+	}
+	if e.HTTPCode != http.StatusConflict {
+		t.Errorf("HTTPCode = %d, want 409", e.HTTPCode)
 	}
 }
 
