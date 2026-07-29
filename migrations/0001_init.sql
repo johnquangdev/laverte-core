@@ -16,6 +16,9 @@ CREATE TABLE users (
     deleted_at TIMESTAMPTZ
 );
 CREATE INDEX idx_users_deleted_at ON users(deleted_at);
+-- GetByOAuth runs on every sign-in. Unique, not just an index: it also stops two
+-- concurrent first-logins for one Google account from both inserting a row.
+CREATE UNIQUE INDEX idx_users_oauth ON users(oauth_provider, oauth_id);
 
 CREATE TABLE refresh_tokens (
     id BIGSERIAL PRIMARY KEY,
