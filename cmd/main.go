@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	migrate "github.com/rubenv/sql-migrate"
@@ -78,9 +80,17 @@ func main() {
 	} else {
 		calendarSvc = cal
 	}
-	// TODO(ZNS/email notifier): wire the real adapter; guests and admins get
-	// no booking notifications until then.
-	notifier := notify.NewNoop()
+	// Both channels are required together: sending the guest's ZNS while the
+	// admin alert has nowhere to go (or the reverse) hides a misconfiguration
+	// behind half-working notifications, so a partial setup stays on the noop.
+	var notifier = notify.NewNoop()
+	if cfg.ZNSAccessToken != "" && cfg.SMTPHost != "" {
+		notifier = notify.NewComposite(notify.NewZNS(cfg, &http.Client{Timeout: 10 * time.Second}), notify.NewSMTPAdmin(cfg))
+	} else {
+		log.Warn("notifications disabled",
+			zap.Bool("zns_configured", cfg.ZNSAccessToken != ""),
+			zap.Bool("smtp_configured", cfg.SMTPHost != ""))
+	}
 
 	billingUC := billinguc.New(bookings, payments, sepay, notifier, calendarSvc, homes, log, *cfg)
 
