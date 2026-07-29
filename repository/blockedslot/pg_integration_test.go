@@ -2,53 +2,21 @@ package blockedslot
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-	migrate "github.com/rubenv/sql-migrate"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/migrations"
+	"github.com/johnquangdev/laverte-home/internal/testdb"
 	"github.com/johnquangdev/laverte-home/model"
 )
 
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("TEST_DATABASE_URL not set")
-	}
-
-	sqlDB, err := sql.Open("pgx", dsn)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	src := &migrate.EmbedFileSystemMigrationSource{FileSystem: migrations.FS, Root: "."}
-	if _, err = migrate.Exec(sqlDB, "postgres", src, migrate.Up); err != nil {
-		t.Fatalf("migrate up: %v", err)
-	}
-	t.Cleanup(func() {
-		// Truncate rather than migrate-down: this database is shared with sibling
-		// packages' integration tests, and a migrate-down would tear the schema out
-		// from under whichever one runs concurrently.
-		if _, err = sqlDB.Exec("TRUNCATE blocked_slots, homes RESTART IDENTITY CASCADE"); err != nil {
-			t.Errorf("truncate: %v", err)
-		}
-		if err = sqlDB.Close(); err != nil {
-			t.Errorf("close db: %v", err)
-		}
-	})
-
-	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("gorm open: %v", err)
-	}
-	return gormDB
+	// Own database per package: go test runs packages in parallel, and a shared
+	// database means one package's cleanup truncates another's fixtures mid-run.
+	return testdb.New(t, "blockedslot")
 }
 
 // TestHasOverlapBoundaries pins the half-open [start, end) convention
