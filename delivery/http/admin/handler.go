@@ -37,6 +37,9 @@ func (h *Handler) grantAdmin(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
+	}
 	grantedBy := middleware.ClaimsFromContext(c).UserID
 	if err := h.uc.GrantAdmin(c.Request().Context(), req, grantedBy); err != nil {
 		return h.handleErr(c, err)

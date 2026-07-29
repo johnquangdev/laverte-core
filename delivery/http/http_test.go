@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -12,6 +14,7 @@ import (
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
 	"github.com/johnquangdev/laverte-home/payload"
 	"github.com/johnquangdev/laverte-home/presenter"
+	"github.com/johnquangdev/laverte-home/util"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
 )
 
@@ -87,6 +90,42 @@ func TestHealthEndpoint(t *testing.T) {
 	srv.Echo().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+// TestAdminHomeCreateRejectsEmptyBody proves the validator wired into Echo via
+// e.Validator actually runs: the `validate:"required"` tags on
+// CreateHomeRequest are decoration unless something invokes them, and removing
+// the e.Validator line in NewServer previously let an empty body through as if
+// it were valid.
+func TestAdminHomeCreateRejectsEmptyBody(t *testing.T) {
+	cfg := config.Config{
+		FrontendURL: "http://localhost:3000", JWTAccessSecret: "test-secret", AdminUserIDs: []uint{7},
+		RateLimitAuthedPerMin: 100,
+	}
+	srv := NewServer(cfg, zap.NewNop(), Deps{
+		Limiter:           ratelimit.NewMemory(),
+		TokenStore:        stubTokenStore{},
+		AuthUC:            stubAuthUC{},
+		AdminUC:           stubAdminUC{},
+		AdminRoleResolver: jwtmw.AdminRoleResolverFunc(func(context.Context, uint) (string, error) { return "", nil }),
+		HomeAdminUC:       stubHomeAdminUC{},
+		PricingAdminUC:    stubPricingAdminUC{},
+	})
+
+	token, err := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7}, time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/homes", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Echo().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
 

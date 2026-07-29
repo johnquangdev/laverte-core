@@ -25,6 +25,9 @@ func (h *HomeHandler) create(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
+	if err := c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
+	}
 	resp, err := h.uc.Create(c.Request().Context(), req)
 	if err != nil {
 		return h.handleErr(c, err)
@@ -40,6 +43,9 @@ func (h *HomeHandler) update(c echo.Context) error {
 	var req payload.UpdateHomeRequest
 	if err = c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	}
+	if err = c.Validate(&req); err != nil {
+		return h.handleErr(c, err)
 	}
 	resp, err := h.uc.Update(c.Request().Context(), uint(id), req)
 	if err != nil {

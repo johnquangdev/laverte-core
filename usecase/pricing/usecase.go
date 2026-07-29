@@ -45,17 +45,22 @@ func computeHourly(rule *model.PricingRule, start, end time.Time) (int64, error)
 	if rule.BaseHours == nil || rule.BasePrice == nil || rule.ExtraHourPrice == nil {
 		return 0, apperr.Validation("bang gia hourly thieu base_hours/base_price/extra_hour_price")
 	}
-	durationHours := end.Sub(start).Hours()
-	if durationHours <= 0 {
+	// Integer nanoseconds throughout: a float64 hour count would put the rounding
+	// decision at an exact-hour boundary on the money path, and whether that is
+	// safe depends on how time.Duration.Hours() splits its integer and fractional
+	// parts — not something the price a customer pays should rest on.
+	duration := end.Sub(start)
+	if duration <= 0 {
 		return 0, apperr.Validation("end_time phai sau start_time")
 	}
-	if durationHours <= float64(*rule.BaseHours) {
+	base := time.Duration(*rule.BaseHours) * time.Hour
+	if duration <= base {
 		return *rule.BasePrice, nil
 	}
-	extraHours := durationHours - float64(*rule.BaseHours)
-	extraWhole := int64(extraHours)
-	if extraHours > float64(extraWhole) {
-		extraWhole++ // round any partial extra hour up to a full extra-hour charge
+	extra := duration - base
+	extraWhole := int64(extra / time.Hour)
+	if extra%time.Hour > 0 {
+		extraWhole++ // a partial extra hour is charged as a whole one
 	}
 	return *rule.BasePrice + extraWhole**rule.ExtraHourPrice, nil
 }
@@ -65,30 +70,36 @@ func computeFlat(rule *model.PricingRule, start time.Time) (int64, error) {
 		return 0, apperr.Validation("bang gia thieu flat_price")
 	}
 	if rule.WindowStart != nil && rule.WindowEnd != nil {
-		if !withinWindow(start, *rule.WindowStart, *rule.WindowEnd) {
+		inside, err := withinWindow(start, *rule.WindowStart, *rule.WindowEnd)
+		if err != nil {
+			return 0, apperr.Internal(err)
+		}
+		if !inside {
 			return 0, apperr.Validation("start_time khong nam trong khung gio ap dung cua rule nay")
 		}
 	}
 	return *rule.FlatPrice, nil
 }
 
-// withinWindow reports whether t's local HH:MM falls in [windowStart,
-// windowEnd), wrapping past midnight when windowEnd <= windowStart (e.g.
-// 22:00-06:00).
-func withinWindow(t time.Time, windowStart, windowEnd string) bool {
+// withinWindow reports whether t's clock time falls in [windowStart, windowEnd),
+// wrapping past midnight when windowEnd <= windowStart (e.g. 22:00-06:00). The
+// interval is half-open: a start exactly at windowStart is inside, one exactly at
+// windowEnd is not.
+func withinWindow(t time.Time, windowStart, windowEnd string) (bool, error) {
+	if err := model.ValidateClockWindow(windowStart, windowEnd); err != nil {
+		return false, err
+	}
+	startMin, err := model.ParseClockMinutes(windowStart)
+	if err != nil {
+		return false, err
+	}
+	endMin, err := model.ParseClockMinutes(windowEnd)
+	if err != nil {
+		return false, err
+	}
 	minutesOfDay := t.Hour()*60 + t.Minute()
-	startMin := hhmmToMinutes(windowStart)
-	endMin := hhmmToMinutes(windowEnd)
-	if startMin <= endMin {
-		return minutesOfDay >= startMin && minutesOfDay < endMin
+	if startMin < endMin {
+		return minutesOfDay >= startMin && minutesOfDay < endMin, nil
 	}
-	return minutesOfDay >= startMin || minutesOfDay < endMin
-}
-
-func hhmmToMinutes(hhmm string) int {
-	var h, m int
-	if _, err := fmt.Sscanf(hhmm, "%d:%d", &h, &m); err != nil {
-		return 0
-	}
-	return h*60 + m
+	return minutesOfDay >= startMin || minutesOfDay < endMin, nil
 }

@@ -29,8 +29,21 @@ func (f *fakeRepo) Create(_ context.Context, r *model.PricingRule) error {
 	return nil
 }
 
-func (f *fakeRepo) Update(_ context.Context, r *model.PricingRule) error {
-	f.byID[r.ID] = r
+// Supersede mirrors the pg repository's transaction: it refuses an unknown or
+// already-superseded id instead of inserting a replacement that would leave
+// two active rules for the category.
+func (f *fakeRepo) Supersede(_ context.Context, oldID uint, replacement *model.PricingRule, at time.Time) error {
+	old, ok := f.byID[oldID]
+	if !ok || !old.IsActive {
+		return gorm.ErrRecordNotFound
+	}
+	old.EffectiveTo = &at
+	old.IsActive = false
+
+	f.nextID++
+	replacement.ID = f.nextID
+	f.byID[replacement.ID] = replacement
+	f.created = append(f.created, replacement)
 	return nil
 }
 
@@ -122,5 +135,28 @@ func TestSupersedeRejectsInvalidCategory(t *testing.T) {
 	}
 	if !repo.byID[original.ID].IsActive {
 		t.Error("a rejected Supersede must not have closed the existing rule")
+	}
+}
+
+// A negative extra_hour_price would make a long stay cheaper than a short one
+// and eventually price a booking below zero; it must never reach the table.
+func TestCreateRejectsNegativeExtraHourPrice(t *testing.T) {
+	req := hourlyReq(200000)
+	neg := int64(-1000)
+	req.ExtraHourPrice = &neg
+	if _, err := New(newFakeRepo()).Create(context.Background(), req); err == nil {
+		t.Fatal("Create() with negative extra_hour_price = nil error, want error")
+	}
+}
+
+// Without both window bounds, computeFlat skips the window check entirely and
+// the rule would apply at any hour like a flat day rate.
+func TestCreateRejectsOvernightWithoutWindow(t *testing.T) {
+	req := payload.UpsertPricingRuleRequest{
+		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeOvernight,
+		FlatPrice: int64p(500000),
+	}
+	if _, err := New(newFakeRepo()).Create(context.Background(), req); err == nil {
+		t.Fatal("Create() with overnight rule missing its window = nil error, want error")
 	}
 }

@@ -1,9 +1,12 @@
 package http
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"go.uber.org/zap"
@@ -33,6 +36,29 @@ type Server struct {
 	log  *zap.Logger
 }
 
+// requestValidator runs the `validate:` struct tags on bound payloads. Without a
+// validator registered on Echo those tags are inert decoration — the tags existed
+// before this did, and every "required" silently passed.
+type requestValidator struct{ v *validator.Validate }
+
+// Validate returns an apperr so a bad payload answers 400 through the shared
+// handleErr path, instead of leaking go-playground's internal field message.
+func (rv *requestValidator) Validate(i any) error {
+	if err := rv.v.Struct(i); err != nil {
+		var invalid *validator.InvalidValidationError
+		if errors.As(err, &invalid) {
+			return apperr.Internal(err)
+		}
+		var fieldErrs validator.ValidationErrors
+		if errors.As(err, &fieldErrs) && len(fieldErrs) > 0 {
+			f := fieldErrs[0]
+			return apperr.Validation(fmt.Sprintf("truong %q khong hop le (%s)", f.Field(), f.Tag()))
+		}
+		return apperr.Validation("du lieu gui len khong hop le")
+	}
+	return nil
+}
+
 // Deps carries what the router needs to mount its route groups. It is a struct
 // with named fields, not a positional parameter list, because nearly every
 // later task adds one more dependency here — a named field can be appended
@@ -51,6 +77,7 @@ type Deps struct {
 func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	e := echo.New()
 	e.HideBanner = true
+	e.Validator = &requestValidator{v: validator.New()}
 	e.Use(middleware.Recover())
 	e.Use(middleware.RequestID())
 	e.Use(middleware.SecureWithConfig(middleware.SecureConfig{
