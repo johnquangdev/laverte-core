@@ -6184,6 +6184,11 @@ type IRepository interface {
 	// MarkPaidIfPending settles a payment exactly once: it reports false (with
 	// a nil error) when the row was no longer pending, which is the normal
 	// outcome for a redelivered webhook and must not be treated as a failure.
+	// MarkPaidIfPending settles a payment exactly once. Redelivery reports
+	// (false, nil) — not an error — so the caller can treat it as "already done".
+	// Returns ErrDuplicateExternalRef when the ref is already claimed by a
+	// different payment; retrying that can never succeed, so the caller must
+	// acknowledge rather than let the provider retry forever.
 	MarkPaidIfPending(ctx context.Context, paymentID uint, externalRef string, paidAt time.Time) (bool, error)
 	// SumPaidBetween totals paid amounts over [from, to).
 	SumPaidBetween(ctx context.Context, from, to time.Time) (int64, error)
@@ -6197,6 +6202,7 @@ package payment
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"gorm.io/gorm"
@@ -6204,9 +6210,20 @@ import (
 	"github.com/johnquangdev/laverte-home/model"
 )
 
+// ErrDuplicateExternalRef means the provider's transaction id is already recorded
+// against a different payment. The partial unique index on sepay_transaction_ref
+// enforces that; without a sentinel the violation reaches the webhook handler as a
+// raw driver error, it answers 500, and SePay retries a settlement that can never
+// succeed.
+var ErrDuplicateExternalRef = errors.New("payment: external ref already claimed by another payment")
+
 type pgRepository struct{ getDB func(context.Context) *gorm.DB }
 
 func NewPG(getDB func(context.Context) *gorm.DB) IRepository { return &pgRepository{getDB} }
+
+// postgresUniqueViolation is the SQLSTATE Postgres raises when a unique index
+// rejects a row — here, the partial index on sepay_transaction_ref.
+const postgresUniqueViolation = "23505"
 
 func (r *pgRepository) Create(ctx context.Context, p *model.Payment) error {
 	return r.getDB(ctx).Create(p).Error
@@ -6236,6 +6253,10 @@ func (r *pgRepository) MarkPaidIfPending(ctx context.Context, paymentID uint, ex
 			"paid_at":               paidAt,
 		})
 	if result.Error != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(result.Error, &pgErr) && pgErr.Code == postgresUniqueViolation {
+			return false, ErrDuplicateExternalRef
+		}
 		return false, result.Error
 	}
 	return result.RowsAffected > 0, nil
@@ -6502,19 +6523,25 @@ func parseBookingMemo(prefix, content string) string {
 		return ""
 	}
 	cleaned := alphanumUpper(content)
-	i := strings.Index(cleaned, cleanPrefix)
-	if i < 0 {
-		return ""
+
+	// Scan every occurrence, not just the first: bank memo text is free-form and can
+	// carry the prefix more than once (a payer note plus the QR's own memo), and
+	// stopping at the first one would miss the real booking id entirely.
+	for offset := 0; ; {
+		i := strings.Index(cleaned[offset:], cleanPrefix)
+		if i < 0 {
+			return ""
+		}
+		rest := cleaned[offset+i+len(cleanPrefix):]
+		end := 0
+		for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+			end++
+		}
+		if end > 0 {
+			return cleanPrefix + rest[:end]
+		}
+		offset += i + len(cleanPrefix)
 	}
-	rest := cleaned[i+len(cleanPrefix):]
-	end := 0
-	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
-		end++
-	}
-	if end == 0 {
-		return ""
-	}
-	return cleanPrefix + rest[:end]
 }
 
 // CreateQR returns a URL-based QR renderer rather than a hand-rolled EMVCo
@@ -6615,15 +6642,20 @@ func (p *sepayProvider) VerifyWebhook(_ context.Context, raw []byte, headers htt
 		return nil, errors.New("sepay: malformed webhook payload")
 	}
 
-	if isSePayWebhookPing(payload) {
-		return nil, ErrWebhookPing
-	}
-
 	memo := parseBookingMemo(p.transferPrefix, payload.Code)
 	if memo == "" {
 		memo = parseBookingMemo(p.transferPrefix, payload.Content)
 	}
+
+	// Ping detection runs only when nothing parseable was found. The marker is a
+	// substring match on the same free-text field the memo comes from, so checking
+	// it first would silently discard a real settlement whose bank memo happened to
+	// contain the phrase — money received, booking never confirmed, nothing logged.
+	// A genuine settlement always carries a memo; the dashboard ping never does.
 	if memo == "" {
+		if isSePayWebhookPing(payload) {
+			return nil, ErrWebhookPing
+		}
 		return nil, errors.New("sepay: no recognizable booking memo in transfer content")
 	}
 
@@ -6770,6 +6802,98 @@ func TestParseBookingMemoSurvivesStrippedPunctuation(t *testing.T) {
 	}
 }
 ```
+
+- [ ] **Step 11b: Add the regression tests the money path cannot go without**
+
+Append to `util/checkout/sepay_test.go`:
+
+```go
+// The HMAC must cover the raw request bytes. Re-encoding the parsed body changes
+// key order and spacing, so a signature over the original bytes must stop
+// matching — if this test passes after a refactor that verifies a re-marshalled
+// struct instead, the webhook would accept a body an attacker rewrote.
+func TestVerifyWebhookRejectsRemarshalledBody(t *testing.T) {
+	p := newTestSePay()
+
+	// Key order and spacing deliberately differ from Go's canonical marshal output.
+	raw := []byte(`{"transferType":"in","content":"CT DEN LAVERTE42","transferAmount":250000,"id":998877,  "accountNumber":"0123456789","code":"LAVERTE42"}`)
+	headers := signedHeaders(raw, testWebhookSecret, time.Now())
+
+	if _, err := p.VerifyWebhook(context.Background(), raw, headers); err != nil {
+		t.Fatalf("the original raw body should verify: %v", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	remarshalled, err := json.Marshal(parsed)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Equal(raw, remarshalled) {
+		t.Fatal("re-marshalling produced identical bytes, so this test proves nothing — change the fixture's key order or spacing")
+	}
+	if _, err := p.VerifyWebhook(context.Background(), remarshalled, headers); err == nil {
+		t.Error("VerifyWebhook accepted a re-marshalled body, so it is not verifying the raw bytes")
+	}
+}
+
+// An operator who never set SEPAY_WEBHOOK_SECRET must get every webhook rejected,
+// not accepted — otherwise anyone who can reach the endpoint settles bookings free.
+func TestVerifyWebhookFailsClosedWithoutSecret(t *testing.T) {
+	cfg := testSePayConfig()
+	cfg.SePayWebhookSecret = ""
+	p := checkout.NewSePay(cfg)
+
+	raw := []byte(`{"transferType":"in","code":"LAVERTE42","transferAmount":250000,"id":1}`)
+	if _, err := p.VerifyWebhook(context.Background(), raw, signedHeaders(raw, "", time.Now())); err == nil {
+		t.Error("VerifyWebhook accepted a webhook with no secret configured")
+	}
+}
+
+// A real settlement whose bank memo happens to contain the dashboard-ping phrase
+// must still settle. Treating it as a ping would take the money and never confirm
+// the booking, with nothing logged.
+func TestVerifyWebhookPrefersMemoOverPingMarker(t *testing.T) {
+	p := newTestSePay()
+
+	raw := []byte(`{"transferType":"in","content":"LAVERTE42 giao dich thu nghiem","transferAmount":250000,"id":42}`)
+	ev, err := p.VerifyWebhook(context.Background(), raw, signedHeaders(raw, testWebhookSecret, time.Now()))
+	if err != nil {
+		t.Fatalf("a settlement carrying a memo must not be treated as a ping: %v", err)
+	}
+	if ev.ProviderRef != "LAVERTE42" {
+		t.Errorf("ProviderRef = %q, want LAVERTE42", ev.ProviderRef)
+	}
+}
+
+// With no memo present the same phrase IS the dashboard ping.
+func TestVerifyWebhookDetectsPingWhenNoMemo(t *testing.T) {
+	p := newTestSePay()
+
+	raw := []byte(`{"transferType":"in","content":"giao dich thu nghiem","transferAmount":2000,"id":7}`)
+	_, err := p.VerifyWebhook(context.Background(), raw, signedHeaders(raw, testWebhookSecret, time.Now()))
+	if !errors.Is(err, checkout.ErrWebhookPing) {
+		t.Errorf("err = %v, want ErrWebhookPing", err)
+	}
+}
+
+// Free-text bank memos can carry the prefix more than once; the booking id may be
+// in the later occurrence.
+func TestParseBookingMemoScansEveryOccurrence(t *testing.T) {
+	got := parseBookingMemo("LAVERTE", "LAVERTE ck cho LAVERTE42")
+	if got != "LAVERTE42" {
+		t.Errorf("parseBookingMemo() = %q, want LAVERTE42", got)
+	}
+}
+```
+
+The file needs `bytes`, `encoding/json` and `errors` in its imports. `newTestSePay`,
+`testSePayConfig`, `testWebhookSecret` and `signedHeaders` are the helpers the
+existing tests already use — reuse them rather than adding parallel ones, and note
+`parseBookingMemo` is package-private so that last test must live in the internal
+test package alongside the others.
 
 - [ ] **Step 11: Run the SePay unit tests**
 
