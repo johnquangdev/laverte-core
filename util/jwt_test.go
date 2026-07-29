@@ -1,6 +1,7 @@
 package util
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -38,8 +39,13 @@ func TestParseTokenRejectsExpired(t *testing.T) {
 }
 
 // ParseToken must reject a token whose header claims a non-HMAC algorithm.
-// Without the signing-method check, an attacker could present an unsigned
-// (alg=none) token and have its claims trusted.
+//
+// Asserting only "some error came back" would not test our own guard at all:
+// jwt/v5 independently refuses alg=none, so such a test passes with the
+// signing-method check deleted. Assert on the guard's own message instead —
+// with the check present the error reads "unexpected signing method"; without
+// it, the library's own "'none' signature type is not allowed" surfaces and
+// this test fails, which is the point.
 func TestParseTokenRejectsNonHMACAlgorithm(t *testing.T) {
 	claims := Claims{UserID: 99, TokenID: "forged"}
 	unsigned, err := jwt.NewWithClaims(jwt.SigningMethodNone, claims).SignedString(jwt.UnsafeAllowNoneSignatureType)
@@ -47,7 +53,11 @@ func TestParseTokenRejectsNonHMACAlgorithm(t *testing.T) {
 		t.Fatalf("building alg=none token: %v", err)
 	}
 
-	if _, err := ParseToken("secret", unsigned); err == nil {
-		t.Error("ParseToken() accepted an alg=none token, want rejection")
+	_, err = ParseToken("secret", unsigned)
+	if err == nil {
+		t.Fatal("ParseToken() accepted an alg=none token, want rejection")
+	}
+	if !strings.Contains(err.Error(), "unexpected signing method") {
+		t.Errorf("rejection came from somewhere other than our signing-method guard: %v", err)
 	}
 }
