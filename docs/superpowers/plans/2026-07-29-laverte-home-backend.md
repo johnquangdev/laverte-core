@@ -659,6 +659,9 @@ CREATE TABLE users (
     deleted_at TIMESTAMPTZ
 );
 CREATE INDEX idx_users_deleted_at ON users(deleted_at);
+-- GetByOAuth runs on every sign-in. Unique, not just an index: it also stops two
+-- concurrent first-logins for one Google account from both inserting a row.
+CREATE UNIQUE INDEX idx_users_oauth ON users(oauth_provider, oauth_id);
 
 CREATE TABLE refresh_tokens (
     id BIGSERIAL PRIMARY KEY,
@@ -1840,6 +1843,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -1885,6 +1889,99 @@ func TestRequireAdminRejectsPlainUser(t *testing.T) {
 	}
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestRequireAdminAllowsGrantedAdmin(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	withClaims(c, 5)
+
+	resolver := AdminRoleResolverFunc(func(context.Context, uint) (string, error) { return model.RoleAdmin, nil })
+	handler := RequireAdmin(config.Config{}, resolver)(func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	if err := handler(c); err != nil {
+		t.Fatalf("handler error = %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 for a CMS-granted admin", rec.Code)
+	}
+}
+
+// Entitlement that cannot be confirmed must not be granted.
+func TestRequireAdminRejectsOnResolverError(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	withClaims(c, 5)
+
+	resolver := AdminRoleResolverFunc(func(context.Context, uint) (string, error) {
+		return "", errors.New("db down")
+	})
+	handler := RequireAdmin(config.Config{}, resolver)(func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	if err := handler(c); err != nil {
+		t.Fatalf("handler error = %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 when the resolver fails", rec.Code)
+	}
+}
+
+func TestRequireSuperAdminAllowsEnvListedUser(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	withClaims(c, 42)
+
+	handler := RequireSuperAdmin(config.Config{AdminUserIDs: []uint{42}})(func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	if err := handler(c); err != nil {
+		t.Fatalf("handler error = %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
+// The tier that stops an admin widening the admin set — including to itself.
+// A granted admin must NOT satisfy RequireSuperAdmin.
+func TestRequireSuperAdminRejectsGrantedAdmin(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	withClaims(c, 5)
+
+	called := false
+	handler := RequireSuperAdmin(config.Config{AdminUserIDs: []uint{42}})(func(c echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	if err := handler(c); err != nil {
+		t.Fatalf("handler error = %v", err)
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+	if called {
+		t.Error("a non-superadmin reached a superadmin-only handler")
+	}
+}
+
+func TestRequireSuperAdminRejectsUnauthenticated(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	handler := RequireSuperAdmin(config.Config{AdminUserIDs: []uint{42}})(func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	if err := handler(c); err != nil {
+		t.Fatalf("handler error = %v", err)
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
 	}
 }
 ```
@@ -1961,6 +2058,8 @@ func rateLimit(limiter ratelimit.ILimiter, limit int, window time.Duration, keyF
 package middleware
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -1994,6 +2093,39 @@ func TestRateLimitByIPDeniesOverLimit(t *testing.T) {
 	}
 	if rec2.Code != http.StatusTooManyRequests {
 		t.Errorf("second call status = %d, want 429", rec2.Code)
+	}
+}
+
+// errLimiter always fails, standing in for Redis being unreachable.
+type errLimiter struct{}
+
+func (errLimiter) Allow(context.Context, string, int, time.Duration) (ratelimit.Result, error) {
+	return ratelimit.Result{}, errors.New("redis down")
+}
+
+// The limiter fails OPEN on purpose: an infra blip should degrade protection,
+// not take the API offline. Note this is the opposite of JWTAuth's blacklist
+// lookup, which fails closed — see that middleware's comment for why.
+func TestRateLimitAllowsWhenLimiterErrors(t *testing.T) {
+	mw := RateLimitByIP("test", errLimiter{}, 1, time.Minute)
+	reached := false
+	handler := mw(func(c echo.Context) error {
+		reached = true
+		return c.NoContent(http.StatusOK)
+	})
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "9.9.9.9:3333"
+	rec := httptest.NewRecorder()
+	if err := handler(e.NewContext(req, rec)); err != nil {
+		t.Fatalf("handler error = %v", err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 — a limiter error must not block the request", rec.Code)
+	}
+	if !reached {
+		t.Error("handler never ran, so the limiter failed closed instead of open")
 	}
 }
 
