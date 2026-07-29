@@ -35,7 +35,12 @@ func (uc *UseCase) Update(ctx context.Context, id uint, req payload.UpdateHomeRe
 		return nil, apperr.NotFound(err)
 	}
 	h.Name, h.Category, h.Address, h.Description = req.Name, req.Category, req.Address, req.Description
-	h.GoogleCalendarID, h.IsActive = req.GoogleCalendarID, req.IsActive
+	if req.GoogleCalendarID != nil {
+		h.GoogleCalendarID = *req.GoogleCalendarID
+	}
+	if req.IsActive != nil {
+		h.IsActive = *req.IsActive
+	}
 	if err := uc.repo.Update(ctx, h); err != nil {
 		return nil, apperr.Internal(err)
 	}
