@@ -14,11 +14,13 @@ import (
 	"github.com/johnquangdev/laverte-home/config"
 	adminhttp "github.com/johnquangdev/laverte-home/delivery/http/admin"
 	authhttp "github.com/johnquangdev/laverte-home/delivery/http/auth"
+	bookinghttp "github.com/johnquangdev/laverte-home/delivery/http/booking"
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
 	apperr "github.com/johnquangdev/laverte-home/errors"
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
 	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
+	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
 	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
@@ -74,6 +76,7 @@ type Deps struct {
 	HomeAdminUC       homeadminuc.IUseCase
 	PricingAdminUC    pricingadminuc.IUseCase
 	BlockedSlotUC     blockedslotuc.IUseCase
+	BookingUC         bookinguc.IUseCase
 }
 
 func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
@@ -118,6 +121,12 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	userLimit := jwtmw.RateLimitByUser("authed", deps.Limiter, cfg.RateLimitAuthedPerMin, window)
 
 	authhttp.Init(api.Group("/auth", ipLimit), deps.AuthUC, handleErr, handleOK)
+
+	// Guests book without an account: this group is deliberately outside the
+	// JWT group, protected only by the two rate limiters.
+	bookingIPLimit := jwtmw.RateLimitByIP("booking", deps.Limiter, cfg.RateLimitBookingPerMinIP, window)
+	bookingPhoneLimit := jwtmw.RateLimitByPhone("booking", deps.Limiter, cfg.RateLimitBookingPerMinPhone, window)
+	bookinghttp.Init(api.Group("/bookings", bookingIPLimit), deps.BookingUC, handleErr, handleOK, bookingPhoneLimit)
 
 	authed := api.Group("", jwtmw.JWTAuth(cfg, deps.TokenStore), userLimit)
 	requireAdmin := jwtmw.RequireAdmin(cfg, deps.AdminRoleResolver)

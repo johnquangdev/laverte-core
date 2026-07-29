@@ -71,6 +71,12 @@ func (stubBlockedSlotUC) ListByHome(context.Context, uint) ([]presenter.BlockedS
 	return nil, nil
 }
 
+type stubBookingUC struct{}
+
+func (stubBookingUC) Create(context.Context, payload.CreateBookingRequest) (*presenter.BookingResponse, error) {
+	return nil, nil
+}
+
 // stubTokenStore reports nothing revoked, so router tests need no Redis.
 type stubTokenStore struct{}
 
@@ -91,6 +97,7 @@ func newTestServer() *Server {
 		HomeAdminUC:       stubHomeAdminUC{},
 		PricingAdminUC:    stubPricingAdminUC{},
 		BlockedSlotUC:     stubBlockedSlotUC{},
+		BookingUC:         stubBookingUC{},
 	})
 }
 
@@ -123,6 +130,7 @@ func TestAdminHomeCreateRejectsEmptyBody(t *testing.T) {
 		HomeAdminUC:       stubHomeAdminUC{},
 		PricingAdminUC:    stubPricingAdminUC{},
 		BlockedSlotUC:     stubBlockedSlotUC{},
+		BookingUC:         stubBookingUC{},
 	})
 
 	token, err := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7}, time.Hour)

@@ -14,15 +14,20 @@ import (
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
 	"github.com/johnquangdev/laverte-home/migrations"
 	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
+	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
 	homerepo "github.com/johnquangdev/laverte-home/repository/home"
+	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
 	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricingrule"
 	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refreshtoken"
 	userrepo "github.com/johnquangdev/laverte-home/repository/user"
 	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
 	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
+	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
+	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
 	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
+	"github.com/johnquangdev/laverte-home/util/checkout"
 	"github.com/johnquangdev/laverte-home/util/oauth"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
 	"github.com/johnquangdev/laverte-home/util/tokenstore"
@@ -46,16 +51,21 @@ func main() {
 	// pricingRules also backs the booking usecase's pricinguc.New(pricingRules).
 	pricingRules := pricingrulerepo.NewPG(dbFactory)
 	blockedSlots := blockedslotrepo.NewPG(dbFactory)
+	bookings := bookingrepo.NewPG(dbFactory)
+	payments := paymentrepo.NewPG(dbFactory)
 
 	oauthSvc := oauth.NewGoogle(cfg)
 	tokenStore := tokenstore.NewRedis(cfg)
 	limiter := ratelimit.NewRedis(cfg)
+	sepay := checkout.NewSePay(*cfg)
 
 	authUC := authuc.New(users, tokens, oauthSvc, tokenStore, *cfg, log)
 	adminUC := adminuc.New(users)
 	homeAdminUC := homeadminuc.New(homes)
 	pricingAdminUC := pricingadminuc.New(pricingRules)
 	blockedSlotUC := blockedslotuc.New(blockedSlots)
+	pricingUC := pricinguc.New(pricingRules)
+	bookingUC := bookinguc.New(bookings, homes, blockedSlots, payments, pricingUC, sepay, *cfg)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
 		u, err := users.GetByID(ctx, userID)
@@ -74,6 +84,7 @@ func main() {
 		HomeAdminUC:       homeAdminUC,
 		PricingAdminUC:    pricingAdminUC,
 		BlockedSlotUC:     blockedSlotUC,
+		BookingUC:         bookingUC,
 	})
 	log.Info("starting server", zap.String("port", cfg.Port))
 	if err := srv.Start(); err != nil {
