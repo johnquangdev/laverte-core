@@ -8024,6 +8024,15 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 	}
 	marked, err := uc.paymentRepo.MarkPaidIfPending(ctx, payment.ID, event.ExternalRef, time.Now())
 	if err != nil {
+		// Retrying cannot help: the provider's transaction id is already recorded
+		// against another payment. Answer success so SePay stops resending, and log
+		// it because a provider reusing a transaction id needs a human to look.
+		if errors.Is(err, paymentrepo.ErrDuplicateExternalRef) {
+			uc.log.Warn("sepay reused a transaction id across payments",
+				zap.Uint("payment_id", payment.ID),
+				zap.String("external_ref", event.ExternalRef))
+			return nil
+		}
 		return apperr.Internal(err)
 	}
 	// Lost the race to a concurrent delivery that already settled this payment.
