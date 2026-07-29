@@ -3,12 +3,15 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"github.com/johnquangdev/laverte-home/config"
+	apperr "github.com/johnquangdev/laverte-home/errors"
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/util/oauth"
 	"github.com/johnquangdev/laverte-home/util/tokenstore"
@@ -69,7 +72,7 @@ func TestRefreshTokenReuseRevokesFamily(t *testing.T) {
 	cfg := config.Config{JWTAccessSecret: "a", JWTRefreshSecret: "r", JWTAccessTTLMinutes: 15, JWTRefreshTTLDays: 30}
 	userRepo := &fakeUserRepo{users: map[uint]*model.User{1: {ID: 1, Email: "a@b.com"}}}
 	tokenRepo := newFakeTokenRepo()
-	uc := New(userRepo, tokenRepo, nil, nil, cfg).(*UseCase)
+	uc := New(userRepo, tokenRepo, nil, nil, cfg, zap.NewNop()).(*UseCase)
 
 	session, err := uc.issueTokenPair(context.Background(), userRepo.users[1], "fam-1")
 	if err != nil {
@@ -87,6 +90,22 @@ func TestRefreshTokenReuseRevokesFamily(t *testing.T) {
 	}
 	if !tokenRepo.family["fam-1"] {
 		t.Error("expected family fam-1 to be revoked after reuse")
+	}
+}
+
+// A bad refresh token is routine client behaviour, not a server fault: it has to
+// surface as 401, or handleErr will classify it as an internal error and answer 500.
+func TestRefreshTokenBadTokenIsUnauthorized(t *testing.T) {
+	cfg := config.Config{JWTAccessSecret: "a", JWTRefreshSecret: "r", JWTAccessTTLMinutes: 15, JWTRefreshTTLDays: 30}
+	uc := New(&fakeUserRepo{users: map[uint]*model.User{}}, newFakeTokenRepo(), nil, nil, cfg, zap.NewNop())
+
+	_, err := uc.RefreshToken(context.Background(), "not-a-jwt")
+	e, ok := apperr.As(err)
+	if !ok {
+		t.Fatalf("error = %v, want an *apperr.Error", err)
+	}
+	if e.HTTPCode != http.StatusUnauthorized {
+		t.Errorf("HTTPCode = %d, want 401", e.HTTPCode)
 	}
 }
 

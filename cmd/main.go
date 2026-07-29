@@ -41,7 +41,7 @@ func main() {
 	tokenStore := tokenstore.NewRedis(cfg)
 	limiter := ratelimit.NewRedis(cfg)
 
-	authUC := authuc.New(users, tokens, oauthSvc, tokenStore, *cfg)
+	authUC := authuc.New(users, tokens, oauthSvc, tokenStore, *cfg, log)
 	adminUC := adminuc.New(users)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
