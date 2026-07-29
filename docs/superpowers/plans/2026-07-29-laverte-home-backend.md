@@ -4928,6 +4928,21 @@ CREATE TABLE bookings (
     expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- tstzrange() itself only rejects end < start, and it rejects it with a raw
+    -- driver error the usecase cannot map. start = end is worse: it builds an
+    -- EMPTY range, which overlaps nothing, so the exclusion constraint below
+    -- would give a zero-duration booking no protection at all.
+    CONSTRAINT bookings_time_order CHECK (end_time > start_time),
+    -- Same defence-in-depth stance as homes.category: the usecase validates
+    -- these, this is the backstop for any writer that bypasses it.
+    CONSTRAINT bookings_status_valid CHECK (status IN
+        ('pending_payment', 'confirmed', 'cancelled', 'expired', 'completed', 'no_show')),
+    CONSTRAINT bookings_type_valid CHECK (booking_type IN ('hourly', 'overnight', 'day')),
+    -- GetPendingByPhone is the anti-spam gate and filters on expires_at > now().
+    -- SQL treats NULL > now() as unknown, so a pending row with no expiry would be
+    -- invisible to that check and silently defeat it.
+    CONSTRAINT bookings_pending_has_expiry CHECK (
+        status <> 'pending_payment' OR expires_at IS NOT NULL),
     EXCLUDE USING gist (
         home_id WITH =,
         tstzrange(start_time, end_time) WITH &&
@@ -4936,6 +4951,9 @@ CREATE TABLE bookings (
 CREATE INDEX idx_bookings_home_id ON bookings(home_id);
 CREATE INDEX idx_bookings_customer_phone ON bookings(customer_phone);
 CREATE INDEX idx_bookings_status ON bookings(status);
+-- The expiry sweep runs every minute over pending_payment rows; status alone
+-- leaves expires_at as a residual filter.
+CREATE INDEX idx_bookings_status_expires_at ON bookings(status, expires_at);
 
 -- +migrate Down
 DROP TABLE bookings;
@@ -4972,6 +4990,13 @@ type IRepository interface {
 	// ListReadyToSendLockCode returns confirmed bookings whose start_time has
 	// already passed, that have a door_lock_code set, and haven't been sent yet.
 	ListReadyToSendLockCode(ctx context.Context, now time.Time) ([]*model.Booking, error)
+	// MarkLockCodeAlertSent and MarkLockCodeSent write one column each, unlike
+	// Update's Save() which rewrites every column from an in-memory snapshot. The
+	// lock-code sweeps run on a timer while an admin may be cancelling the same
+	// booking; a read-modify-Save from either side would silently discard the
+	// other's change.
+	MarkLockCodeAlertSent(ctx context.Context, id uint, at time.Time) error
+	MarkLockCodeSent(ctx context.Context, id uint, at time.Time) error
 }
 ```
 
@@ -5070,6 +5095,18 @@ func (r *pgRepository) ListReadyToSendLockCode(ctx context.Context, now time.Tim
 		Find(&out).Error
 	return out, err
 }
+
+func (r *pgRepository) MarkLockCodeAlertSent(ctx context.Context, id uint, at time.Time) error {
+	return r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ?", id).
+		Update("lock_code_alert_sent_at", at).Error
+}
+
+func (r *pgRepository) MarkLockCodeSent(ctx context.Context, id uint, at time.Time) error {
+	return r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ?", id).
+		Update("lock_code_sent_at", at).Error
+}
 ```
 
 - [ ] **Step 5: Write `repository/booking/pg_integration_test.go`** (this is the test that proves the exclusion constraint works — requires the docker-compose Postgres from Task 2)
@@ -5092,6 +5129,12 @@ import (
 	"github.com/johnquangdev/laverte-home/migrations"
 	"github.com/johnquangdev/laverte-home/model"
 )
+
+// expiresIn builds the *time.Time the pending-expiry CHECK requires.
+func expiresIn(d time.Duration) *time.Time {
+	t := time.Now().Add(d)
+	return &t
+}
 
 func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -5145,6 +5188,7 @@ func TestCreateRejectsOverlappingBookingForSameHome(t *testing.T) {
 		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000001",
 		StartTime: start, EndTime: end, BookingType: model.BookingTypeHourly,
 		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ExpiresAt: expiresIn(15 * time.Minute),
 	}
 	if err := repo.Create(ctx, first); err != nil {
 		t.Fatalf("first Create() error = %v", err)
@@ -5154,6 +5198,7 @@ func TestCreateRejectsOverlappingBookingForSameHome(t *testing.T) {
 		HomeID: home.ID, CustomerName: "B", CustomerPhone: "0900000002",
 		StartTime: start.Add(30 * time.Minute), EndTime: end.Add(30 * time.Minute),
 		BookingType: model.BookingTypeHourly, ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ExpiresAt: expiresIn(15 * time.Minute),
 	}
 	if err := repo.Create(ctx, overlapping); err != ErrSlotConflict {
 		t.Fatalf("second Create() error = %v, want ErrSlotConflict", err)
@@ -5176,6 +5221,7 @@ func TestCreateAllowsNonOverlappingBookingForSameHome(t *testing.T) {
 		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000001",
 		StartTime: start, EndTime: start.Add(time.Hour), BookingType: model.BookingTypeHourly,
 		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ExpiresAt: expiresIn(15 * time.Minute),
 	}
 	if err := repo.Create(ctx, first); err != nil {
 		t.Fatalf("first Create() error = %v", err)
@@ -5185,9 +5231,69 @@ func TestCreateAllowsNonOverlappingBookingForSameHome(t *testing.T) {
 		HomeID: home.ID, CustomerName: "B", CustomerPhone: "0900000002",
 		StartTime: start.Add(time.Hour), EndTime: start.Add(2 * time.Hour),
 		BookingType: model.BookingTypeHourly, ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ExpiresAt: expiresIn(15 * time.Minute),
 	}
 	if err := repo.Create(ctx, after); err != nil {
 		t.Fatalf("adjacent (non-overlapping) Create() error = %v, want nil", err)
+	}
+}
+
+// tstzrange builds an EMPTY range when start == end, and an empty range overlaps
+// nothing — so without this CHECK a zero-duration booking would slip past the
+// exclusion constraint entirely.
+func TestCreateRejectsZeroAndNegativeDuration(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Test Home 4", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	start := time.Now().Add(time.Hour).Truncate(time.Second)
+
+	for _, c := range []struct {
+		name string
+		end  time.Time
+	}{
+		{"zero duration", start},
+		{"end before start", start.Add(-time.Hour)},
+	} {
+		b := &model.Booking{
+			HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000009",
+			StartTime: start, EndTime: c.end, BookingType: model.BookingTypeHourly,
+			ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+			ExpiresAt: expiresIn(15 * time.Minute),
+		}
+		if err := repo.Create(ctx, b); err == nil {
+			t.Errorf("%s: Create() = nil error, want rejection", c.name)
+		}
+	}
+}
+
+// GetPendingByPhone filters on expires_at > now(), and NULL > now() is unknown in
+// SQL — a pending row with no expiry would be invisible to the anti-spam gate.
+func TestCreateRejectsPendingWithoutExpiry(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Test Home 5", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	start := time.Now().Add(time.Hour).Truncate(time.Second)
+
+	b := &model.Booking{
+		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000010",
+		StartTime: start, EndTime: start.Add(time.Hour), BookingType: model.BookingTypeHourly,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ExpiresAt: nil,
+	}
+	if err := repo.Create(ctx, b); err == nil {
+		t.Error("Create() accepted a pending_payment booking with no expires_at")
 	}
 }
 
@@ -5216,6 +5322,7 @@ func TestCreateAllowsOverlapWhenFirstIsCancelled(t *testing.T) {
 		HomeID: home.ID, CustomerName: "B", CustomerPhone: "0900000002",
 		StartTime: start, EndTime: start.Add(2 * time.Hour), BookingType: model.BookingTypeHourly,
 		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment,
+		ExpiresAt: expiresIn(15 * time.Minute),
 	}
 	if err := repo.Create(ctx, overlapping); err != nil {
 		t.Fatalf("Create() overlapping a cancelled booking error = %v, want nil", err)
@@ -6017,6 +6124,7 @@ func seedPendingPayment(t *testing.T, db *gorm.DB, repo IRepository, phone strin
 		HomeID: home.ID, CustomerName: "A", CustomerPhone: phone,
 		StartTime: start, EndTime: start.Add(2 * time.Hour), BookingType: model.BookingTypeHourly,
 		ComputedPrice: amount, Status: model.BookingStatusPendingPayment,
+		ExpiresAt: expiresIn(15 * time.Minute),
 	}
 	if err := db.Create(booking).Error; err != nil {
 		t.Fatalf("create booking: %v", err)
@@ -6853,6 +6961,20 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 	return 0, nil
 }
 
+func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeAlertSentAt = &at
+	}
+	return nil
+}
+
+func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeSentAt = &at
+	}
+	return nil
+}
+
 type fakeHomeRepo struct{ home *model.Home }
 
 func (f *fakeHomeRepo) Create(context.Context, *model.Home) error { return nil }
@@ -7648,6 +7770,20 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 	return 0, nil
 }
 
+func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeAlertSentAt = &at
+	}
+	return nil
+}
+
+func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeSentAt = &at
+	}
+	return nil
+}
+
 type fakePaymentRepo struct {
 	payment   *model.Payment
 	markOK    bool
@@ -7765,6 +7901,7 @@ func pendingBooking() *model.Booking {
 		ID: 42, HomeID: 1, CustomerName: "Khach A", CustomerPhone: "0900000001",
 		BookingType: model.BookingTypeHourly, ComputedPrice: 300000,
 		Status: model.BookingStatusPendingPayment,
+		ExpiresAt: expiresIn(15 * time.Minute),
 	}
 }
 
@@ -9361,6 +9498,20 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 	return 0, nil
 }
 
+func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeAlertSentAt = &at
+	}
+	return nil
+}
+
+func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeSentAt = &at
+	}
+	return nil
+}
+
 type fakeHomeRepo struct{ homes map[uint]*model.Home }
 
 func (f *fakeHomeRepo) Create(_ context.Context, h *model.Home) error { f.homes[h.ID] = h; return nil }
@@ -10190,6 +10341,20 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 	return 0, nil
 }
 
+func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeAlertSentAt = &at
+	}
+	return nil
+}
+
+func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeSentAt = &at
+	}
+	return nil
+}
+
 type fakePaymentRepo struct {
 	rows   map[uint]*model.Payment
 	nextID uint
@@ -10527,6 +10692,20 @@ Every hand-written `bookingrepo.IRepository` fake now needs this method. The fak
 ```go
 func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time.Time) (int64, error) {
 	return 0, nil
+}
+
+func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeAlertSentAt = &at
+	}
+	return nil
+}
+
+func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
+	if b, ok := f.byID[id]; ok {
+		b.LockCodeSentAt = &at
+	}
+	return nil
 }
 ```
 
