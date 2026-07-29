@@ -11,7 +11,7 @@ import (
 
 // requires `docker compose -f docker-compose.dev.yml up -d` and
 // TEST_DATABASE_URL, e.g.
-// postgres://laverte:laverte@localhost:5432/laverte?sslmode=disable
+// postgres://laverte:laverte@localhost:55432/laverte?sslmode=disable
 func TestMigrationsApplyCleanly(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {

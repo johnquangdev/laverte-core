@@ -6,13 +6,15 @@ services:
       POSTGRES_PASSWORD: laverte
       POSTGRES_DB: laverte
     ports:
-      - "5432:5432"
+      # Host 5432/6379 are taken by another project's stack on this machine, so
+      # bind laverte's stack to its own ports rather than fighting for them.
+      - "55432:5432"
     volumes:
       - laverte_pg_data:/var/lib/postgresql/data
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
 
 volumes:
   laverte_pg_data:
