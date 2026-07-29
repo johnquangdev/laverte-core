@@ -56,9 +56,18 @@ func TestBuildEvent(t *testing.T) {
 
 	ev := buildEvent(cfg, b)
 
-	wantSummary := "Booking #42 — Nguyen Van A (0901234567)"
+	wantSummary := "Booking #42 — hourly"
 	if ev.Summary != wantSummary {
 		t.Errorf("Summary = %q, want %q", ev.Summary, wantSummary)
+	}
+	// These calendars get shared with cleaning/maintenance staff for scheduling;
+	// the summary is what they see without opening the event, so it must never
+	// carry guest contact details.
+	if strings.Contains(ev.Summary, b.CustomerName) {
+		t.Errorf("Summary = %q, must not contain the customer name", ev.Summary)
+	}
+	if strings.Contains(ev.Summary, b.CustomerPhone) {
+		t.Errorf("Summary = %q, must not contain the customer phone", ev.Summary)
 	}
 	if ev.Start.TimeZone != "Asia/Ho_Chi_Minh" {
 		t.Errorf("Start.TimeZone = %q, want Asia/Ho_Chi_Minh", ev.Start.TimeZone)
@@ -72,13 +81,13 @@ func TestBuildEvent(t *testing.T) {
 	if ev.End.DateTime != "2026-08-01T17:00:00Z" {
 		t.Errorf("End.DateTime = %q, want 2026-08-01T17:00:00Z", ev.End.DateTime)
 	}
-	if !strings.Contains(ev.Description, "0901234567") {
+	if !strings.Contains(ev.Description, b.CustomerName) {
+		t.Errorf("Description = %q, want it to contain the customer name", ev.Description)
+	}
+	if !strings.Contains(ev.Description, b.CustomerPhone) {
 		t.Errorf("Description = %q, want it to contain the customer phone", ev.Description)
 	}
 	if !strings.Contains(ev.Description, "450000") {
 		t.Errorf("Description = %q, want it to contain the computed price", ev.Description)
-	}
-	if !strings.Contains(ev.Description, model.BookingTypeHourly) {
-		t.Errorf("Description = %q, want it to contain the booking type", ev.Description)
 	}
 }
