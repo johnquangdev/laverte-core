@@ -33,12 +33,22 @@ type IRepository interface {
 	MarkLockCodeAlertSent(ctx context.Context, id uint, at time.Time) error
 	SetDoorLockCode(ctx context.Context, id uint, code string) error
 
+	// ExpireIfPending flips one booking to 'expired' only if it is still
+	// 'pending_payment', reporting whether it won. The expiry sweep reads a whole
+	// batch up front and writes each row a moment later; a full-row Save from that
+	// snapshot would clobber a booking the SePay webhook confirmed in between —
+	// reverting Status and PaymentID, and since 'expired' sits outside the overlap
+	// exclusion constraint, reopening a paid guest's slot to a stranger.
+	ExpireIfPending(ctx context.Context, id uint) (bool, error)
+
 	// ClaimLockCodeSend stamps lock_code_sent_at only if it is still NULL, reporting
 	// whether this caller won. A door code is a physical-access credential, so
 	// read-check-send-then-mark is not enough: two in-flight sends (a double-clicked
 	// button, or two cron instances) would both see NULL and both deliver it. The
-	// caller sends only when this returns true, and calls ReleaseLockCodeSend if the
-	// send then fails, so a retry can still deliver.
+	// claim also requires status 'confirmed', so a booking cancelled after the caller
+	// read it cannot still receive its code. The caller sends only when this returns
+	// true, and calls ReleaseLockCodeSend if the send then fails, so a retry can
+	// still deliver.
 	ClaimLockCodeSend(ctx context.Context, id uint, at time.Time) (bool, error)
 	ReleaseLockCodeSend(ctx context.Context, id uint) error
 }

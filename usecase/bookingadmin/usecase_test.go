@@ -122,6 +122,18 @@ func (f *fakeBookingRepo) SetDoorLockCode(_ context.Context, id uint, code strin
 	return nil
 }
 
+// ExpireIfPending mirrors the guarded UPDATE rather than reporting a constant success:
+// the admin operations here move bookings out of pending_payment, so a fake that always
+// claimed the row would let a future test pass while the real query declined.
+func (f *fakeBookingRepo) ExpireIfPending(_ context.Context, id uint) (bool, error) {
+	b, ok := f.rows[id]
+	if !ok || b.Status != model.BookingStatusPendingPayment {
+		return false, nil
+	}
+	b.Status = model.BookingStatusExpired
+	return true, nil
+}
+
 // ClaimLockCodeSend mirrors the SQL: stamp only when lock_code_sent_at is still
 // NULL, and report whether this caller won the claim.
 func (f *fakeBookingRepo) ClaimLockCodeSend(_ context.Context, id uint, at time.Time) (bool, error) {
@@ -129,7 +141,7 @@ func (f *fakeBookingRepo) ClaimLockCodeSend(_ context.Context, id uint, at time.
 		f.beforeClaim()
 	}
 	b, ok := f.rows[id]
-	if !ok || b.LockCodeSentAt != nil {
+	if !ok || b.Status != model.BookingStatusConfirmed || b.LockCodeSentAt != nil {
 		return false, nil
 	}
 	b.LockCodeSentAt = &at

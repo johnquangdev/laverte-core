@@ -97,6 +97,18 @@ func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at t
 // only; this package's tests exercise booking creation, not the lock-code flow.
 func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error { return nil }
 
+// ExpireIfPending mirrors the guarded UPDATE: creation releases an orphan hold through
+// this path, so a fake that always claimed the row would hide a release that ran
+// against a booking already confirmed.
+func (f *fakeBookingRepo) ExpireIfPending(_ context.Context, id uint) (bool, error) {
+	b, ok := f.byID[id]
+	if !ok || b.Status != model.BookingStatusPendingPayment {
+		return false, nil
+	}
+	b.Status = model.BookingStatusExpired
+	return true, nil
+}
+
 func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
 	return true, nil
 }

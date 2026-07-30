@@ -42,9 +42,16 @@ func (uc *UseCase) ExpirePendingBookings(ctx context.Context) error {
 		// One unwritable row must not strand the rest of the batch: every booking
 		// left pending keeps a slot unsellable, and the sweep runs again in a
 		// minute, so a per-row failure is logged and retried rather than aborting.
-		b.Status = model.BookingStatusExpired
-		if err := uc.bookingRepo.Update(ctx, b); err != nil {
+		expired, err := uc.bookingRepo.ExpireIfPending(ctx, b.ID)
+		if err != nil {
 			uc.log.Error("expire booking failed", zap.Uint("booking_id", b.ID), zap.Error(err))
+			continue
+		}
+		// The webhook confirmed this booking after the list query above. Leaving it
+		// alone is the whole point of the guarded update — writing the batch snapshot
+		// back would revert a paid stay to 'expired' and, because 'expired' is outside
+		// the overlap exclusion constraint, reopen the slot to a different guest.
+		if !expired {
 			continue
 		}
 		uc.expirePaymentOf(ctx, b)

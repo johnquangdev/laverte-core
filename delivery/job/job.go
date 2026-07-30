@@ -14,7 +14,10 @@ type Job struct {
 }
 
 func New(uc bookingjobsuc.IUseCase, log *zap.Logger) *Job {
-	c := cron.New()
+	// SkipIfStillRunning, not the default overlapping behaviour: two of these fire
+	// every minute and each sweeps a whole batch, so a slow tick would otherwise have
+	// a second run reading the same rows the first has not finished writing.
+	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)))
 	j := &Job{cron: c, uc: uc, log: log}
 	// AddFunc only fails on a malformed spec, and these specs are constants.
 	_, _ = c.AddFunc("* * * * *", j.expirePendingBookings)

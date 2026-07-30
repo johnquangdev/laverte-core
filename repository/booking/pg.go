@@ -105,9 +105,22 @@ func (r *pgRepository) SetDoorLockCode(ctx context.Context, id uint, code string
 		Update("door_lock_code", code).Error
 }
 
+func (r *pgRepository) ExpireIfPending(ctx context.Context, id uint) (bool, error) {
+	res := r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ? AND status = ?", id, model.BookingStatusPendingPayment).
+		Update("status", model.BookingStatusExpired)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// The status predicate matters as much as the NULL one: a booking cancelled between
+// the sweep's list query and this claim must not have its door code delivered, and
+// the admin's own send races the same way between its status read and its claim.
 func (r *pgRepository) ClaimLockCodeSend(ctx context.Context, id uint, at time.Time) (bool, error) {
 	res := r.getDB(ctx).Model(&model.Booking{}).
-		Where("id = ? AND lock_code_sent_at IS NULL", id).
+		Where("id = ? AND status = ? AND lock_code_sent_at IS NULL", id, model.BookingStatusConfirmed).
 		Update("lock_code_sent_at", at)
 	if res.Error != nil {
 		return false, res.Error

@@ -83,6 +83,17 @@ func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at t
 // only; this package's tests exercise the SePay webhook, not the lock-code flow.
 func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error { return nil }
 
+// ExpireIfPending mirrors the guarded UPDATE rather than stubbing it: the webhook this
+// package tests is the other half of that race, so a fake that always claimed the row
+// would hide a settle path that expires a booking it just confirmed.
+func (f *fakeBookingRepo) ExpireIfPending(_ context.Context, id uint) (bool, error) {
+	if f.booking == nil || f.booking.ID != id || f.booking.Status != model.BookingStatusPendingPayment {
+		return false, nil
+	}
+	f.booking.Status = model.BookingStatusExpired
+	return true, nil
+}
+
 func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
 	return true, nil
 }

@@ -16,15 +16,25 @@ type fakeBookingRepo struct {
 	rows       map[uint]*model.Booking
 	nextID     uint
 	updateErrs map[uint]error
+	expireErrs map[uint]error
 
 	updateCalls  int
 	setCodeCalls int
 	claimCalls   int
 	releaseCalls int
+	expireCalls  int
+
+	// beforeExpire runs inside ExpireIfPending, standing in for the SePay webhook
+	// confirming this booking between the sweep's list query and its write.
+	beforeExpire func()
 }
 
 func newFakeBookingRepo() *fakeBookingRepo {
-	return &fakeBookingRepo{rows: map[uint]*model.Booking{}, updateErrs: map[uint]error{}}
+	return &fakeBookingRepo{
+		rows:       map[uint]*model.Booking{},
+		updateErrs: map[uint]error{},
+		expireErrs: map[uint]error{},
+	}
 }
 
 func (f *fakeBookingRepo) seed(b *model.Booking) *model.Booking {
@@ -124,11 +134,29 @@ func (f *fakeBookingRepo) SetDoorLockCode(_ context.Context, id uint, code strin
 	return nil
 }
 
+// ExpireIfPending mirrors the guarded UPDATE: the row moves only while it is still
+// pending, and expireErrs lets a test fail one row without failing the batch.
+func (f *fakeBookingRepo) ExpireIfPending(_ context.Context, id uint) (bool, error) {
+	if f.beforeExpire != nil {
+		f.beforeExpire()
+	}
+	f.expireCalls++
+	if err := f.expireErrs[id]; err != nil {
+		return false, err
+	}
+	b, ok := f.rows[id]
+	if !ok || b.Status != model.BookingStatusPendingPayment {
+		return false, nil
+	}
+	b.Status = model.BookingStatusExpired
+	return true, nil
+}
+
 // ClaimLockCodeSend mirrors the SQL: stamp only when lock_code_sent_at is still
 // NULL, and report whether this caller won the claim.
 func (f *fakeBookingRepo) ClaimLockCodeSend(_ context.Context, id uint, at time.Time) (bool, error) {
 	b, ok := f.rows[id]
-	if !ok || b.LockCodeSentAt != nil {
+	if !ok || b.Status != model.BookingStatusConfirmed || b.LockCodeSentAt != nil {
 		return false, nil
 	}
 	b.LockCodeSentAt = &at
@@ -197,6 +225,7 @@ type fakeNotifier struct {
 	lockCodeCalls int
 	lockCodeErr   error
 	alertCalls    int
+	alertErr      error
 }
 
 func (f *fakeNotifier) BookingConfirmed(context.Context, *model.Booking) error { return nil }
@@ -206,7 +235,7 @@ func (f *fakeNotifier) LockCode(context.Context, *model.Booking, string) error {
 }
 func (f *fakeNotifier) AdminLockCodeMissing(context.Context, *model.Booking) error {
 	f.alertCalls++
-	return nil
+	return f.alertErr
 }
 
 func newTestUseCase() (*UseCase, *fakeBookingRepo, *fakePaymentRepo, *fakeNotifier) {
@@ -257,13 +286,46 @@ func TestExpirePendingBookingsContinuesAfterRowFailure(t *testing.T) {
 	past := time.Now().Add(-time.Minute)
 	broken := bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusPendingPayment, ExpiresAt: &past})
 	good := bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusPendingPayment, ExpiresAt: &past})
-	bookings.updateErrs[broken.ID] = errors.New("write conflict")
+	bookings.expireErrs[broken.ID] = errors.New("write conflict")
 
 	if err := uc.ExpirePendingBookings(context.Background()); err != nil {
 		t.Fatalf("ExpirePendingBookings() error = %v, want nil (per-row failures are logged)", err)
 	}
 	if good.Status != model.BookingStatusExpired {
 		t.Errorf("second booking Status = %q, want %q — a failed row must not abort the sweep", good.Status, model.BookingStatusExpired)
+	}
+	if bookings.updateCalls != 0 {
+		t.Errorf("updateCalls = %d, want 0: expiry must go through the guarded transition, not a full-row Save",
+			bookings.updateCalls)
+	}
+}
+
+// The sweep lists a batch, then writes each row a moment later. A booking the SePay
+// webhook confirmed in that gap must survive: 'expired' sits outside the overlap
+// exclusion constraint, so reverting a paid stay would reopen its slot to a stranger.
+func TestExpirePendingBookingsLeavesBookingConfirmedMidSweepAlone(t *testing.T) {
+	uc, bookings, payments, _ := newTestUseCase()
+	past := time.Now().Add(-time.Minute)
+	b := bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusPendingPayment, ExpiresAt: &past})
+	paidAt := time.Now()
+	p := payments.seed(&model.Payment{BookingID: b.ID, Provider: model.PaymentProviderSePay, Status: model.PaymentStatusPending, Amount: 300000})
+
+	// Stand in for the webhook landing between the list query and this row's write.
+	bookings.beforeExpire = func() {
+		b.Status = model.BookingStatusConfirmed
+		p.Status = model.PaymentStatusPaid
+		p.PaidAt = &paidAt
+	}
+
+	if err := uc.ExpirePendingBookings(context.Background()); err != nil {
+		t.Fatalf("ExpirePendingBookings() error = %v", err)
+	}
+	if b.Status != model.BookingStatusConfirmed {
+		t.Errorf("Status = %q, want %q — the guarded update must not overwrite a booking the webhook confirmed",
+			b.Status, model.BookingStatusConfirmed)
+	}
+	if p.Status != model.PaymentStatusPaid {
+		t.Errorf("payment Status = %q, want %q", p.Status, model.PaymentStatusPaid)
 	}
 }
 
@@ -285,6 +347,25 @@ func TestAlertMissingLockCodesAlertsOnceOnly(t *testing.T) {
 	}
 	if notifier.alertCalls != 1 {
 		t.Errorf("AdminLockCodeMissing calls = %d, want 1", notifier.alertCalls)
+	}
+}
+
+// LockCodeAlertSentAt is what stops the admin being re-alerted every tick, so it must
+// not be written when the alert never went out — otherwise a single email outage means
+// nobody is ever told that a stay starting in ten minutes has no door code.
+func TestAlertMissingLockCodesLeavesTimestampNilWhenAlertFails(t *testing.T) {
+	uc, bookings, _, notifier := newTestUseCase()
+	b := bookings.seed(&model.Booking{
+		HomeID: 1, Status: model.BookingStatusConfirmed,
+		StartTime: time.Now().Add(10 * time.Minute),
+	})
+	notifier.alertErr = errors.New("smtp down")
+
+	if err := uc.AlertMissingLockCodes(context.Background()); err != nil {
+		t.Fatalf("AlertMissingLockCodes() error = %v, want nil (per-row failures are logged)", err)
+	}
+	if b.LockCodeAlertSentAt != nil {
+		t.Errorf("LockCodeAlertSentAt = %v, want nil so the next tick alerts again", b.LockCodeAlertSentAt)
 	}
 }
 

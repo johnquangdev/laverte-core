@@ -221,6 +221,78 @@ func TestCreateRejectsPendingWithoutExpiry(t *testing.T) {
 	}
 }
 
+// TestExpireIfPendingExpiresPendingBooking proves the guarded UPDATE the expiry
+// sweep relies on: a still-pending row moves to 'expired' and reports true.
+func TestExpireIfPendingExpiresPendingBooking(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Expire Test Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	start := time.Now().Add(time.Hour).Truncate(time.Second)
+	b := &model.Booking{
+		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000020",
+		StartTime: start, EndTime: start.Add(time.Hour), BookingType: model.BookingTypeHourly,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: expiresIn(-time.Minute),
+	}
+	if err := db.Create(b).Error; err != nil {
+		t.Fatalf("seed pending booking: %v", err)
+	}
+
+	expired, err := repo.ExpireIfPending(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("ExpireIfPending() error = %v", err)
+	}
+	if !expired {
+		t.Fatal("ExpireIfPending() expired = false, want true for a still-pending row")
+	}
+
+	got, err := repo.GetByID(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusExpired {
+		t.Errorf("Status = %q, want %q", got.Status, model.BookingStatusExpired)
+	}
+}
+
+// TestExpireIfPendingLeavesConfirmedBookingAlone proves the guard the expiry sweep's
+// Critical fix depends on: a booking the webhook already confirmed must not be
+// reverted, since 'expired' sits outside the overlap exclusion constraint and would
+// reopen a paid guest's slot to a stranger.
+func TestExpireIfPendingLeavesConfirmedBookingAlone(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Expire Test Home 2", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	b := seedConfirmedBooking(t, db, home.ID, "0900000021")
+
+	expired, err := repo.ExpireIfPending(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("ExpireIfPending() error = %v", err)
+	}
+	if expired {
+		t.Fatal("ExpireIfPending() expired = true, want false for an already-confirmed row")
+	}
+
+	got, err := repo.GetByID(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusConfirmed {
+		t.Errorf("Status = %q, want unchanged %q", got.Status, model.BookingStatusConfirmed)
+	}
+}
+
 // seedConfirmedBooking inserts a confirmed booking with no door code and no
 // lock-code timestamps — the starting state for the lock-code sweeps.
 func seedConfirmedBooking(t *testing.T, db *gorm.DB, homeID uint, phone string) *model.Booking {
@@ -266,6 +338,47 @@ func TestClaimLockCodeSendFirstClaimWinsSecondFails(t *testing.T) {
 	}
 	if claimedAgain {
 		t.Fatal("second ClaimLockCodeSend() claimed = true, want false — the row is already claimed")
+	}
+}
+
+// TestClaimLockCodeSendRejectsCancelledBooking proves the status predicate the
+// Important 2 fix adds: a booking cancelled after the sweep's list query — with
+// lock_code_sent_at still NULL — must not have its door code claimed, or a guest
+// whose stay is no longer honored still gets physical access to the property.
+func TestClaimLockCodeSendRejectsCancelledBooking(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Claim Cancelled Test Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	start := time.Now().Add(time.Hour).Truncate(time.Second)
+	b := &model.Booking{
+		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000013",
+		StartTime: start, EndTime: start.Add(time.Hour), BookingType: model.BookingTypeHourly,
+		ComputedPrice: 100000, Status: model.BookingStatusCancelled,
+	}
+	if err := db.Create(b).Error; err != nil {
+		t.Fatalf("seed cancelled booking: %v", err)
+	}
+
+	claimed, err := repo.ClaimLockCodeSend(ctx, b.ID, time.Now())
+	if err != nil {
+		t.Fatalf("ClaimLockCodeSend() error = %v", err)
+	}
+	if claimed {
+		t.Fatal("ClaimLockCodeSend() on a cancelled booking claimed = true, want false")
+	}
+
+	var sentAt sql.NullTime
+	if err := db.Model(&model.Booking{}).Where("id = ?", b.ID).Pluck("lock_code_sent_at", &sentAt).Error; err != nil {
+		t.Fatalf("read back lock_code_sent_at: %v", err)
+	}
+	if sentAt.Valid {
+		t.Fatalf("lock_code_sent_at = %v after a rejected claim, want SQL NULL", sentAt.Time)
 	}
 }
 
@@ -343,5 +456,101 @@ func TestSetDoorLockCodeChangesOnlyThatColumn(t *testing.T) {
 	}
 	if got.CustomerName != "Changed Concurrently" {
 		t.Errorf("CustomerName = %q, want the concurrently-written value to survive untouched", got.CustomerName)
+	}
+}
+
+// TestClaimLockCodeSendDeclinesCancelledBooking covers the other half of the claim's
+// guard: the sweep lists confirmed bookings, but an admin can cancel one before its
+// turn comes, and a cancelled stay must not receive the door code.
+func TestClaimLockCodeSendDeclinesCancelledBooking(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Cancelled Claim Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	b := seedConfirmedBooking(t, db, home.ID, "0900000013")
+	if err := db.Model(&model.Booking{}).Where("id = ?", b.ID).
+		Update("status", model.BookingStatusCancelled).Error; err != nil {
+		t.Fatalf("cancel booking: %v", err)
+	}
+
+	claimed, err := repo.ClaimLockCodeSend(ctx, b.ID, time.Now())
+	if err != nil {
+		t.Fatalf("ClaimLockCodeSend() error = %v", err)
+	}
+	if claimed {
+		t.Fatal("ClaimLockCodeSend() claimed = true for a cancelled booking, want false")
+	}
+
+	var sentAt sql.NullTime
+	if err := db.Model(&model.Booking{}).Where("id = ?", b.ID).Pluck("lock_code_sent_at", &sentAt).Error; err != nil {
+		t.Fatalf("read back lock_code_sent_at: %v", err)
+	}
+	if sentAt.Valid {
+		t.Fatalf("lock_code_sent_at = %v, want SQL NULL — a declined claim must not stamp the row", sentAt.Time)
+	}
+}
+
+// TestExpireIfPendingOnlyMovesPendingRows is the guard that keeps the expiry sweep from
+// reverting a booking the webhook confirmed after the sweep's list query. Expired sits
+// outside the overlap exclusion constraint, so a lost race there reopens a paid guest's
+// slot to a stranger.
+func TestExpireIfPendingOnlyMovesPendingRows(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Expire Test Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+
+	start := time.Now().Add(time.Hour).Truncate(time.Second)
+	expiresAt := time.Now().Add(-time.Minute)
+	pending := &model.Booking{
+		HomeID: home.ID, CustomerName: "A", CustomerPhone: "0900000014",
+		StartTime: start, EndTime: start.Add(time.Hour), BookingType: model.BookingTypeHourly,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: &expiresAt,
+	}
+	if err := db.Create(pending).Error; err != nil {
+		t.Fatalf("seed pending booking: %v", err)
+	}
+
+	expired, err := repo.ExpireIfPending(ctx, pending.ID)
+	if err != nil {
+		t.Fatalf("ExpireIfPending() error = %v", err)
+	}
+	if !expired {
+		t.Fatal("ExpireIfPending() expired = false for a pending row, want true")
+	}
+	got, err := repo.GetByID(ctx, pending.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusExpired {
+		t.Errorf("Status = %q, want %q", got.Status, model.BookingStatusExpired)
+	}
+
+	// A second sweep tick — or the same tick after the webhook confirmed the row —
+	// must decline rather than write.
+	confirmed := seedConfirmedBooking(t, db, home.ID, "0900000015")
+	expired, err = repo.ExpireIfPending(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("ExpireIfPending() on a confirmed row error = %v", err)
+	}
+	if expired {
+		t.Fatal("ExpireIfPending() expired = true for a confirmed booking, want false")
+	}
+	got, err = repo.GetByID(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusConfirmed {
+		t.Errorf("Status = %q, want %q left untouched", got.Status, model.BookingStatusConfirmed)
 	}
 }
