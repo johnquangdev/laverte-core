@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
@@ -82,6 +83,33 @@ func (c *Config) DatabaseURL() string {
 var cfg *Config
 
 // GetConfig loads env once (godotenv then envconfig) and caches the result.
+// Validate reports the settings the money path cannot degrade without. The notifier
+// and Calendar adapters deliberately warn and fall back to a no-op when half
+// configured, but a missing SePay setting has no safe degraded mode: without the bank
+// details every guest booking 500s at CreateQR *after* its row is already committed and
+// holding a slot, and without the webhook secret every callback is rejected as
+// unsigned, so no transfer ever settles and every booking expires unpaid. Both look
+// like a healthy process from the outside.
+func (c *Config) Validate() error {
+	var missing []string
+	for _, f := range []struct {
+		name  string
+		value string
+	}{
+		{"SEPAY_BANK_ACCOUNT", c.SePayBankAccount},
+		{"SEPAY_BANK_CODE", c.SePayBankCode},
+		{"SEPAY_WEBHOOK_SECRET", c.SePayWebhookSecret},
+	} {
+		if f.value == "" {
+			missing = append(missing, f.name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("config: missing required settings: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
 func GetConfig() *Config {
 	if cfg != nil {
 		return cfg

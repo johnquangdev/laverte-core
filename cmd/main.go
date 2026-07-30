@@ -47,6 +47,10 @@ func main() {
 	log, _ := zap.NewProduction()
 	defer func() { _ = log.Sync() }()
 
+	if err := cfg.Validate(); err != nil {
+		log.Fatal("invalid configuration", zap.Error(err))
+	}
+
 	// Resolved once, before anything serves traffic: an unparseable zone name would
 	// otherwise surface as a wrong 24-hour window on an admin's first ?date= query,
 	// with nothing to indicate the dates were read in the wrong clock.
