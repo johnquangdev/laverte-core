@@ -27,6 +27,13 @@ type fakeBookingRepo struct {
 	claimCalls   int
 	releaseCalls int
 
+	// The walk-in path assigns PaymentID and GoogleCalendarEventID in memory before
+	// persisting them, and seed() hands back the very pointer it stores, so asserting
+	// on the field value alone passes whether or not the repository write ran. These
+	// two count the write itself.
+	setPaymentIDCalls int
+	setCalendarCalls  int
+
 	// beforeClaim runs inside ClaimLockCodeSend, standing in for another writer
 	// winning the claim between the caller's read and its own attempt.
 	beforeClaim func()
@@ -75,6 +82,7 @@ func (f *fakeBookingRepo) GetByID(_ context.Context, id uint) (*model.Booking, e
 }
 
 func (f *fakeBookingRepo) SetPaymentID(_ context.Context, id uint, paymentID uint) error {
+	f.setPaymentIDCalls++
 	if b, ok := f.rows[id]; ok {
 		b.PaymentID = &paymentID
 	}
@@ -82,6 +90,7 @@ func (f *fakeBookingRepo) SetPaymentID(_ context.Context, id uint, paymentID uin
 }
 
 func (f *fakeBookingRepo) SetCalendarEventID(_ context.Context, id uint, eventID string) error {
+	f.setCalendarCalls++
 	if b, ok := f.rows[id]; ok {
 		b.GoogleCalendarEventID = eventID
 	}
@@ -378,6 +387,12 @@ func TestCreateWalkInIsConfirmedAndAttributedToAdmin(t *testing.T) {
 	if stored.GoogleCalendarEventID != "evt-1" {
 		t.Errorf("GoogleCalendarEventID = %q, want evt-1", stored.GoogleCalendarEventID)
 	}
+	// The field above is also set in memory, so only the counter proves the id reached
+	// the row. Losing it leaves a cancelled walk-in on the shared calendar forever,
+	// since deleteCalendarEvent gives up on an empty id.
+	if d.bookings.setCalendarCalls != 1 {
+		t.Errorf("SetCalendarEventID calls = %d, want 1", d.bookings.setCalendarCalls)
+	}
 	if stored.CustomerPhone != "84900000001" {
 		t.Errorf("CustomerPhone = %q, want normalized 84900000001", stored.CustomerPhone)
 	}
@@ -408,6 +423,12 @@ func TestCreateWalkInWithPaidCashCreatesCashPayment(t *testing.T) {
 	}
 	if stored := d.bookings.rows[resp.ID]; stored.PaymentID == nil || *stored.PaymentID != p.ID {
 		t.Errorf("booking.PaymentID = %v, want %d", stored.PaymentID, p.ID)
+	}
+	// Same reason as the calendar id: without the counter, the in-memory assignment
+	// satisfies the check above and a walk-in could ship with a paid cash payment
+	// that nothing links back to its booking.
+	if d.bookings.setPaymentIDCalls != 1 {
+		t.Errorf("SetPaymentID calls = %d, want 1", d.bookings.setPaymentIDCalls)
 	}
 }
 

@@ -179,7 +179,15 @@ func (f *fakeBookingRepo) ExpireIfPending(ctx context.Context, id uint) (bool, e
 	return f.ReleaseHoldIfPending(ctx, id)
 }
 
-func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
+// ClaimLockCodeSend mirrors the SQL predicate even though this package never reaches
+// it: a constant win is the direction that would let a future test here believe a door
+// code was claimed when the real query declined.
+func (f *fakeBookingRepo) ClaimLockCodeSend(_ context.Context, id uint, at time.Time) (bool, error) {
+	b, ok := f.byID[id]
+	if !ok || b.Status != model.BookingStatusConfirmed || b.LockCodeSentAt != nil {
+		return false, nil
+	}
+	b.LockCodeSentAt = &at
 	return true, nil
 }
 

@@ -18,8 +18,13 @@ import (
 )
 
 type fakeBookingRepo struct {
-	booking          *model.Booking
-	confirmCalls     int
+	booking *model.Booking
+	// confirmAttempts counts calls, confirmWins only the ones that took the row.
+	// Distinguishing them is the point: a redelivery that should have short-circuited
+	// on the re-read still loses the guard, so counting wins alone cannot show it
+	// reached the database at all.
+	confirmAttempts  int
+	confirmWins      int
 	setCalendarCalls int
 	getCalls         int
 	// getErr, if set, makes every GetByID fail with it instead of the normal
@@ -58,10 +63,11 @@ func (f *fakeBookingRepo) ConfirmIfPending(_ context.Context, id uint, paymentID
 	if f.beforeConfirm != nil {
 		f.beforeConfirm()
 	}
+	f.confirmAttempts++
 	if f.booking == nil || f.booking.ID != id || f.booking.Status != model.BookingStatusPendingPayment {
 		return false, nil
 	}
-	f.confirmCalls++
+	f.confirmWins++
 	f.booking.Status = model.BookingStatusConfirmed
 	f.booking.PaymentID = &paymentID
 	return true, nil
@@ -160,7 +166,15 @@ func (f *fakeBookingRepo) ReleaseHoldIfPending(ctx context.Context, id uint) (bo
 	return f.ExpireIfPending(ctx, id)
 }
 
-func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
+// ClaimLockCodeSend mirrors the SQL predicate even though this package never reaches
+// it: a constant win is the direction that would let a future test here believe a door
+// code was claimed when the real query declined.
+func (f *fakeBookingRepo) ClaimLockCodeSend(_ context.Context, id uint, at time.Time) (bool, error) {
+	if f.booking == nil || f.booking.ID != id ||
+		f.booking.Status != model.BookingStatusConfirmed || f.booking.LockCodeSentAt != nil {
+		return false, nil
+	}
+	f.booking.LockCodeSentAt = &at
 	return true, nil
 }
 
@@ -355,8 +369,8 @@ func TestHandleSePayWebhookDoesNotResurrectCancelledBooking(t *testing.T) {
 	if h.bookings.booking.Status != model.BookingStatusCancelled {
 		t.Errorf("Status = %q, want %q left standing", h.bookings.booking.Status, model.BookingStatusCancelled)
 	}
-	if h.bookings.confirmCalls != 0 {
-		t.Errorf("ConfirmIfPending wins = %d, want 0", h.bookings.confirmCalls)
+	if h.bookings.confirmWins != 0 {
+		t.Errorf("ConfirmIfPending wins = %d, want 0", h.bookings.confirmWins)
 	}
 	if h.calendar.createCalls != 0 {
 		t.Errorf("CreateEvent calls = %d, want 0 — the cancelled stay must not get a fresh event", h.calendar.createCalls)
@@ -372,8 +386,8 @@ func TestHandleSePayWebhookAcknowledgesPing(t *testing.T) {
 	if err := h.uc.HandleSePayWebhook(context.Background(), []byte(""), http.Header{}); err != nil {
 		t.Fatalf("HandleSePayWebhook() on ping error = %v, want nil", err)
 	}
-	if h.payments.markCalls != 0 || h.bookings.confirmCalls != 0 {
-		t.Errorf("ping mutated state: markCalls=%d confirmCalls=%d", h.payments.markCalls, h.bookings.confirmCalls)
+	if h.payments.markCalls != 0 || h.bookings.confirmWins != 0 {
+		t.Errorf("ping mutated state: markCalls=%d confirmWins=%d", h.payments.markCalls, h.bookings.confirmWins)
 	}
 	if h.bookings.booking.Status != model.BookingStatusPendingPayment {
 		t.Errorf("Status = %q, want unchanged %q", h.bookings.booking.Status, model.BookingStatusPendingPayment)
@@ -437,8 +451,8 @@ func TestHandleSePayWebhookRecoversStrandedSettlement(t *testing.T) {
 	if h.bookings.booking.Status != model.BookingStatusConfirmed {
 		t.Errorf("Status = %q, want confirmed (recovered)", h.bookings.booking.Status)
 	}
-	if h.bookings.confirmCalls != 1 {
-		t.Errorf("ConfirmIfPending calls = %d, want 1", h.bookings.confirmCalls)
+	if h.bookings.confirmWins != 1 {
+		t.Errorf("ConfirmIfPending wins = %d, want 1", h.bookings.confirmWins)
 	}
 	if h.bookings.setCalendarCalls != 1 {
 		t.Errorf("SetCalendarEventID calls = %d, want 1 — recovery must still push the event", h.bookings.setCalendarCalls)
@@ -468,8 +482,9 @@ func TestHandleSePayWebhookConcurrentRaceLoserIsANoOp(t *testing.T) {
 	if h.bookings.booking.Status != model.BookingStatusConfirmed {
 		t.Errorf("Status = %q, want confirmed (by the winner)", h.bookings.booking.Status)
 	}
-	if h.bookings.confirmCalls != 0 {
-		t.Errorf("ConfirmIfPending calls = %d, want 0 — the loser must not touch it again", h.bookings.confirmCalls)
+	if h.bookings.confirmAttempts != 0 {
+		t.Errorf("ConfirmIfPending calls = %d, want 0 — the loser must short-circuit on the re-read, not fall through and lose the guard",
+			h.bookings.confirmAttempts)
 	}
 	if h.notifier.confirmedCalls != 0 {
 		t.Errorf("BookingConfirmed calls = %d, want 0 — the loser must not notify again", h.notifier.confirmedCalls)
