@@ -9941,9 +9941,11 @@ func (uc *UseCase) SendLockCode(ctx context.Context, id uint) error {
 		return apperr.Internal(err)
 	}
 
-	now := time.Now()
-	b.LockCodeSentAt = &now
-	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+	// One column, not Update's Save-every-column: the Task 17 sweep writes this same
+	// field on a timer, and a read-modify-Save from here would overwrite its value
+	// from a snapshot taken before it ran — resetting LockCodeSentAt and sending the
+	// door code a second time.
+	if err := uc.bookingRepo.MarkLockCodeSent(ctx, b.ID, time.Now()); err != nil {
 		return apperr.Internal(err)
 	}
 	return nil

@@ -23,6 +23,7 @@ import (
 	billinguc "github.com/johnquangdev/laverte-home/usecase/billing"
 	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
 	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
+	bookingadminuc "github.com/johnquangdev/laverte-home/usecase/bookingadmin"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
 	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
@@ -79,6 +80,7 @@ type Deps struct {
 	PricingAdminUC    pricingadminuc.IUseCase
 	BlockedSlotUC     blockedslotuc.IUseCase
 	BookingUC         bookinguc.IUseCase
+	BookingAdminUC    bookingadminuc.IUseCase
 	BillingUC         billinguc.IUseCase
 }
 
@@ -146,6 +148,7 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	adminhttp.InitHomes(adminGroup, deps.HomeAdminUC, handleErr, handleOK)
 	adminhttp.InitPricingRules(adminGroup, deps.PricingAdminUC, handleErr, handleOK)
 	adminhttp.InitBlockedSlots(adminGroup, deps.BlockedSlotUC, handleErr, handleOK)
+	adminhttp.InitBookings(adminGroup, deps.BookingAdminUC, handleErr, handleOK)
 
 	return &Server{echo: e, cfg: cfg, log: log}
 }

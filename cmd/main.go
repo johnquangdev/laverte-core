@@ -25,6 +25,7 @@ import (
 	billinguc "github.com/johnquangdev/laverte-home/usecase/billing"
 	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
 	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
+	bookingadminuc "github.com/johnquangdev/laverte-home/usecase/bookingadmin"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
 	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
 	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
@@ -81,6 +82,7 @@ func main() {
 	notifier := notify.FromConfig(cfg, log)
 
 	billingUC := billinguc.New(bookings, payments, sepay, notifier, calendarSvc, homes, log, *cfg)
+	bookingAdminUC := bookingadminuc.New(bookings, homes, blockedSlots, payments, pricingUC, notifier, calendarSvc, log)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
 		u, err := users.GetByID(ctx, userID)
@@ -100,6 +102,7 @@ func main() {
 		PricingAdminUC:    pricingAdminUC,
 		BlockedSlotUC:     blockedSlotUC,
 		BookingUC:         bookingUC,
+		BookingAdminUC:    bookingAdminUC,
 		BillingUC:         billingUC,
 	})
 	log.Info("starting server", zap.String("port", cfg.Port))

@@ -77,6 +77,20 @@ func (stubBookingUC) Create(context.Context, payload.CreateBookingRequest) (*pre
 	return nil, nil
 }
 
+type stubBookingAdminUC struct{}
+
+func (stubBookingAdminUC) ListByHomeAndDate(context.Context, uint, time.Time) ([]presenter.AdminBookingResponse, error) {
+	return nil, nil
+}
+func (stubBookingAdminUC) CreateWalkIn(context.Context, payload.CreateWalkInBookingRequest, uint) (*presenter.AdminBookingResponse, error) {
+	return nil, nil
+}
+func (stubBookingAdminUC) Cancel(context.Context, uint) error              { return nil }
+func (stubBookingAdminUC) Complete(context.Context, uint) error            { return nil }
+func (stubBookingAdminUC) NoShow(context.Context, uint) error              { return nil }
+func (stubBookingAdminUC) SetLockCode(context.Context, uint, string) error { return nil }
+func (stubBookingAdminUC) SendLockCode(context.Context, uint) error        { return nil }
+
 type stubBillingUC struct{}
 
 func (stubBillingUC) HandleSePayWebhook(context.Context, []byte, http.Header) error { return nil }
@@ -102,6 +116,7 @@ func newTestServer() *Server {
 		PricingAdminUC:    stubPricingAdminUC{},
 		BlockedSlotUC:     stubBlockedSlotUC{},
 		BookingUC:         stubBookingUC{},
+		BookingAdminUC:    stubBookingAdminUC{},
 		BillingUC:         stubBillingUC{},
 	})
 }
@@ -136,6 +151,7 @@ func TestAdminHomeCreateRejectsEmptyBody(t *testing.T) {
 		PricingAdminUC:    stubPricingAdminUC{},
 		BlockedSlotUC:     stubBlockedSlotUC{},
 		BookingUC:         stubBookingUC{},
+		BookingAdminUC:    stubBookingAdminUC{},
 		BillingUC:         stubBillingUC{},
 	})
 
