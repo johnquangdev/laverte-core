@@ -17,6 +17,7 @@ import (
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/payload"
 	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
+	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
 	"github.com/johnquangdev/laverte-home/util/checkout"
 )
 
@@ -531,6 +532,30 @@ func TestCreateMapsRepoSlotConflictToApperr(t *testing.T) {
 	}
 	if e.Code != apperr.CodeSlotConflict {
 		t.Errorf("Code = %q, want %q", e.Code, apperr.CodeSlotConflict)
+	}
+}
+
+// TestCreateRejectsOverlongBooking guards the other half of the flat-price fix.
+// Even priced correctly, an unbounded range is a denial-of-business: the rate
+// limiter allows repeated holds and each one takes a home off the market for the
+// whole pending TTL at zero cost. The refusal must land before any pricing,
+// provider or slot work.
+func TestCreateRejectsOverlongBooking(t *testing.T) {
+	h := newHarness()
+	req := validRequest()
+	req.BookingType = model.BookingTypeDay
+	req.EndTime = req.StartTime.Add(pricinguc.MaxBookingDuration + time.Second)
+
+	_, err := h.uc.Create(context.Background(), req)
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeValidation {
+		t.Fatalf("Create() over the duration cap error = %v, want apperr Validation", err)
+	}
+	if len(h.bookings.created) != 0 {
+		t.Errorf("created %d bookings, want 0", len(h.bookings.created))
+	}
+	if h.pricing.calls != 0 || h.provider.calls != 0 {
+		t.Errorf("pricing=%d provider=%d, want 0/0", h.pricing.calls, h.provider.calls)
 	}
 }
 

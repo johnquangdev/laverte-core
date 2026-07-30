@@ -13,6 +13,7 @@ import (
 	"github.com/johnquangdev/laverte-home/payload"
 	"github.com/johnquangdev/laverte-home/presenter"
 	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
+	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
 	"github.com/johnquangdev/laverte-home/util/checkout"
 )
 
@@ -22,6 +23,9 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 	}
 	if !model.IsValidBookingType(req.BookingType) {
 		return nil, apperr.Validation("booking_type phai la 'hourly', 'overnight' hoac 'day'")
+	}
+	if err := pricinguc.ValidateDuration(req.StartTime, req.EndTime); err != nil {
+		return nil, err
 	}
 
 	// Every phone-keyed lookup (re-use check, rate limiter, stored booking) must use

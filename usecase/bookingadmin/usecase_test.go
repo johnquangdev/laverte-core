@@ -12,6 +12,7 @@ import (
 	"github.com/johnquangdev/laverte-home/model"
 	"github.com/johnquangdev/laverte-home/payload"
 	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
+	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
 )
 
 type fakeBookingRepo struct {
@@ -56,12 +57,11 @@ func (f *fakeBookingRepo) Create(_ context.Context, b *model.Booking) error {
 	return nil
 }
 
-// GetByID returns a copy, mirroring GORM's First: the caller's local struct is
-// a snapshot from read time, not a live view of the row. Without that, no fake
-// Update could ever be shown to lose a concurrent column write, since it would
-// just be re-storing the exact object the rest of the test still holds.
-// afterGetByID fires after the snapshot is taken, so it can land a write that
-// the snapshot — and therefore any Update built from it — will not see.
+// GetByID returns a copy, mirroring GORM's First: the caller's local struct is a
+// snapshot from read time, not a live view of the row. Without that, a usecase's
+// read-time status check and the SQL guard behind it could never disagree, so no
+// test could show the guard doing any work. afterGetByID fires after the snapshot
+// is taken, so it can land a change the caller cannot see.
 func (f *fakeBookingRepo) GetByID(_ context.Context, id uint) (*model.Booking, error) {
 	b, ok := f.rows[id]
 	if !ok {
@@ -408,6 +408,25 @@ func TestCreateWalkInWithPaidCashCreatesCashPayment(t *testing.T) {
 	}
 	if stored := d.bookings.rows[resp.ID]; stored.PaymentID == nil || *stored.PaymentID != p.ID {
 		t.Errorf("booking.PaymentID = %v, want %d", stored.PaymentID, p.ID)
+	}
+}
+
+// The walk-in path prices and holds slots exactly like the guest path, so it needs
+// the same cap: an admin typo of the year in end_time would otherwise take a home
+// off the market indefinitely at one night's rate.
+func TestCreateWalkInRejectsOverlongBooking(t *testing.T) {
+	uc, d := newTestUseCase()
+	req := walkInRequest()
+	req.BookingType = model.BookingTypeDay
+	req.EndTime = req.StartTime.Add(pricinguc.MaxBookingDuration + time.Second)
+
+	_, err := uc.CreateWalkIn(context.Background(), req, 77)
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeValidation {
+		t.Fatalf("CreateWalkIn() over the duration cap error = %v, want apperr Validation", err)
+	}
+	if len(d.bookings.rows) != 0 {
+		t.Errorf("seeded %d bookings, want 0", len(d.bookings.rows))
 	}
 }
 

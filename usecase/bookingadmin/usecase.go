@@ -72,6 +72,9 @@ func (uc *UseCase) CreateWalkIn(ctx context.Context, req payload.CreateWalkInBoo
 	if !model.IsValidBookingType(req.BookingType) {
 		return nil, apperr.Validation("booking_type phai la 'hourly', 'overnight' hoac 'day'")
 	}
+	if err := pricinguc.ValidateDuration(req.StartTime, req.EndTime); err != nil {
+		return nil, err
+	}
 	// One canonical spelling for the stored row and any later phone-keyed lookup
 	// (the guest usecase's re-use check, the rate limiter), so the same number
 	// cannot hold several slots under different formats.

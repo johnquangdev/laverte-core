@@ -35,7 +35,7 @@ func (uc *UseCase) Compute(ctx context.Context, category, bookingType string, st
 	case model.PricingRuleTypeHourly:
 		return computeHourly(rule, start, end)
 	case model.PricingRuleTypeOvernight, model.PricingRuleTypeDay:
-		return computeFlat(rule, start)
+		return computeFlat(rule, start, end)
 	default:
 		return 0, apperr.Validation(fmt.Sprintf("booking_type khong hop le: %q", bookingType))
 	}
@@ -65,10 +65,35 @@ func computeHourly(rule *model.PricingRule, start, end time.Time) (int64, error)
 	return *rule.BasePrice + extraWhole**rule.ExtraHourPrice, nil
 }
 
-func computeFlat(rule *model.PricingRule, start time.Time) (int64, error) {
+// day is the unit an overnight or day rule's flat price buys. An overnight
+// 22:00→06:00 is one unit, not a fraction of one; 22:00 Monday → 06:00 Wednesday
+// is two.
+const day = 24 * time.Hour
+
+// MaxBookingDuration caps how long a single booking may run. A domain limit rather
+// than a deployment knob: a confirmed booking occupies its home for its whole
+// range through the overlap exclusion constraint, and even an unpaid hold occupies
+// it for the pending TTL, so an unbounded range takes a property off the market
+// for the price of one HTTP request.
+const MaxBookingDuration = 30 * day
+
+// ValidateDuration rejects a range longer than MaxBookingDuration. Both create
+// paths call this rather than testing the constant themselves, so the guest and
+// walk-in flows cannot drift apart and the message cannot drift from the limit.
+func ValidateDuration(start, end time.Time) error {
+	if end.Sub(start) > MaxBookingDuration {
+		return apperr.Validation(fmt.Sprintf("thoi gian dat toi da %d ngay", int64(MaxBookingDuration/day)))
+	}
+	return nil
+}
+
+func computeFlat(rule *model.PricingRule, start, end time.Time) (int64, error) {
 	if rule.FlatPrice == nil {
 		return 0, apperr.Validation("bang gia thieu flat_price")
 	}
+	// The window applies to start only: an overnight rule's 22:00-06:00 says when the
+	// stay may begin, and checking end against it would refuse the 06:00 checkout the
+	// rule is named for.
 	if rule.WindowStart != nil && rule.WindowEnd != nil {
 		inside, err := withinWindow(start, *rule.WindowStart, *rule.WindowEnd)
 		if err != nil {
@@ -78,7 +103,19 @@ func computeFlat(rule *model.PricingRule, start time.Time) (int64, error) {
 			return 0, apperr.Validation("start_time khong nam trong khung gio ap dung cua rule nay")
 		}
 	}
-	return *rule.FlatPrice, nil
+
+	// Same integer-only rule as computeHourly above, and for the same reason. Without
+	// the unit count a year-long "day" booking is priced at one day's rate and then,
+	// once paid, blocks the property for the year.
+	duration := end.Sub(start)
+	if duration <= 0 {
+		return 0, apperr.Validation("end_time phai sau start_time")
+	}
+	units := int64(duration / day)
+	if duration%day > 0 {
+		units++ // a partial day is charged as a whole one
+	}
+	return units * *rule.FlatPrice, nil
 }
 
 // withinWindow reports whether t's clock time falls in [windowStart, windowEnd),

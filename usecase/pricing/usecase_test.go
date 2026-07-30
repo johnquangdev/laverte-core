@@ -2,9 +2,11 @@ package pricing
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
+	apperr "github.com/johnquangdev/laverte-home/errors"
 	"github.com/johnquangdev/laverte-home/model"
 )
 
@@ -126,6 +128,79 @@ func TestComputeHourlyExactHourBoundaries(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: price = %d, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+// TestComputeFlatChargesPerDayUnit is the regression guard for a flat price that
+// ignored end_time: a "day" booking of any length was charged one day's rate, so a
+// year-long range cost one night and then, once paid, blocked the property for the
+// year through the overlap exclusion constraint.
+func TestComputeFlatChargesPerDayUnit(t *testing.T) {
+	repo := &fakePricingRuleRepo{rules: []*model.PricingRule{{
+		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeDay,
+		FlatPrice: int64p(800000),
+	}}}
+	uc := New(repo)
+	start := time.Date(2026, 8, 1, 14, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		dur  time.Duration
+		want int64
+	}{
+		{"an overnight 8h stay is one unit", 8 * time.Hour, 800000},
+		{"exactly 24h is one unit, not two", 24 * time.Hour, 800000},
+		{"one second past 24h buys the second unit", 24*time.Hour + time.Second, 1600000},
+		{"32h spans two nights", 32 * time.Hour, 1600000},
+		{"exactly 48h is two units", 48 * time.Hour, 1600000},
+		{"49h is three", 49 * time.Hour, 2400000},
+		{"exactly 72h is three units", 72 * time.Hour, 2400000},
+	}
+	for _, c := range cases {
+		got, err := uc.Compute(context.Background(), model.HomeCategoryNest,
+			model.PricingRuleTypeDay, start, start.Add(c.dur), start)
+		if err != nil {
+			t.Fatalf("%s: Compute() error = %v", c.name, err)
+		}
+		if got != c.want {
+			t.Errorf("%s: price = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// An overnight rule's window gates start only, so a multi-night stay must still be
+// charged per night rather than refused or discounted to one.
+func TestComputeOvernightChargesPerNightInsideWindow(t *testing.T) {
+	repo := &fakePricingRuleRepo{rules: []*model.PricingRule{{
+		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeOvernight,
+		FlatPrice: int64p(500000), WindowStart: strp("22:00"), WindowEnd: strp("06:00"),
+	}}}
+	uc := New(repo)
+	start := time.Date(2026, 8, 3, 22, 0, 0, 0, time.UTC)
+
+	got, err := uc.Compute(context.Background(), model.HomeCategoryNest,
+		model.PricingRuleTypeOvernight, start, start.Add(32*time.Hour), start)
+	if err != nil {
+		t.Fatalf("Compute() error = %v", err)
+	}
+	if got != 1000000 {
+		t.Errorf("price = %d, want 1000000 (two nights)", got)
+	}
+}
+
+func TestValidateDurationRejectsOverThirtyDays(t *testing.T) {
+	start := time.Date(2026, 8, 1, 14, 0, 0, 0, time.UTC)
+
+	if err := ValidateDuration(start, start.Add(MaxBookingDuration)); err != nil {
+		t.Errorf("ValidateDuration() at exactly the limit = %v, want nil", err)
+	}
+	err := ValidateDuration(start, start.Add(MaxBookingDuration+time.Second))
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeValidation {
+		t.Fatalf("ValidateDuration() one second over = %v, want apperr Validation", err)
+	}
+	if !strings.Contains(e.Message, "30") {
+		t.Errorf("message = %q, want it to name the 30-day limit", e.Message)
 	}
 }
 
