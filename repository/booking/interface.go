@@ -26,11 +26,19 @@ type IRepository interface {
 	// ListReadyToSendLockCode returns confirmed bookings whose start_time has
 	// already passed, that have a door_lock_code set, and haven't been sent yet.
 	ListReadyToSendLockCode(ctx context.Context, now time.Time) ([]*model.Booking, error)
-	// MarkLockCodeAlertSent and MarkLockCodeSent write one column each, unlike
-	// Update's Save() which rewrites every column from an in-memory snapshot. The
-	// lock-code sweeps run on a timer while an admin may be cancelling the same
-	// booking; a read-modify-Save from either side would silently discard the
-	// other's change.
+	// These write one column each, unlike Update's Save() which rewrites every column
+	// from an in-memory snapshot. The lock-code sweeps run on a timer while an admin
+	// may be acting on the same booking; a read-modify-Save from either side would
+	// silently discard the other's change.
 	MarkLockCodeAlertSent(ctx context.Context, id uint, at time.Time) error
-	MarkLockCodeSent(ctx context.Context, id uint, at time.Time) error
+	SetDoorLockCode(ctx context.Context, id uint, code string) error
+
+	// ClaimLockCodeSend stamps lock_code_sent_at only if it is still NULL, reporting
+	// whether this caller won. A door code is a physical-access credential, so
+	// read-check-send-then-mark is not enough: two in-flight sends (a double-clicked
+	// button, or two cron instances) would both see NULL and both deliver it. The
+	// caller sends only when this returns true, and calls ReleaseLockCodeSend if the
+	// send then fails, so a retry can still deliver.
+	ClaimLockCodeSend(ctx context.Context, id uint, at time.Time) (bool, error)
+	ReleaseLockCodeSend(ctx context.Context, id uint) error
 }

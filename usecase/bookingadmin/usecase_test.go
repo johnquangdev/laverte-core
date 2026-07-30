@@ -19,6 +19,24 @@ type fakeBookingRepo struct {
 	nextID     uint
 	createErr  error
 	updateErrs map[uint]error
+
+	// Call counters. The lock-code paths deliberately avoid the full-row Update, so
+	// the tests assert on which method ran — without that, a regression back to
+	// Update would leave every value-based assertion still passing.
+	updateCalls  int
+	setCodeCalls int
+	claimCalls   int
+	releaseCalls int
+
+	// beforeClaim runs inside ClaimLockCodeSend, standing in for another writer
+	// winning the claim between the caller's read and its own attempt.
+	beforeClaim func()
+
+	// afterGetByID runs inside GetByID, given the stored row rather than the copy
+	// handed to the caller — it stands in for a concurrent writer (e.g. the alert
+	// sweep) landing its own change on the DB row between this read and whatever
+	// write the caller makes from its now-stale copy.
+	afterGetByID func(stored *model.Booking)
 }
 
 func newFakeBookingRepo() *fakeBookingRepo {
@@ -40,12 +58,22 @@ func (f *fakeBookingRepo) Create(_ context.Context, b *model.Booking) error {
 	return nil
 }
 
+// GetByID returns a copy, mirroring GORM's First: the caller's local struct is
+// a snapshot from read time, not a live view of the row. Without that, no fake
+// Update could ever be shown to lose a concurrent column write, since it would
+// just be re-storing the exact object the rest of the test still holds.
+// afterGetByID fires after the snapshot is taken, so it can land a write that
+// the snapshot — and therefore any Update built from it — will not see.
 func (f *fakeBookingRepo) GetByID(_ context.Context, id uint) (*model.Booking, error) {
 	b, ok := f.rows[id]
 	if !ok {
 		return nil, errors.New("booking not found")
 	}
-	return b, nil
+	cp := *b
+	if f.afterGetByID != nil {
+		f.afterGetByID(b)
+	}
+	return &cp, nil
 }
 
 func (f *fakeBookingRepo) Update(_ context.Context, b *model.Booking) error {
@@ -53,6 +81,7 @@ func (f *fakeBookingRepo) Update(_ context.Context, b *model.Booking) error {
 		return err
 	}
 	f.rows[b.ID] = b
+	f.updateCalls++
 	return nil
 }
 
@@ -85,10 +114,34 @@ func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at t
 	return nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
+func (f *fakeBookingRepo) SetDoorLockCode(_ context.Context, id uint, code string) error {
 	if b, ok := f.rows[id]; ok {
-		b.LockCodeSentAt = &at
+		b.DoorLockCode = &code
 	}
+	f.setCodeCalls++
+	return nil
+}
+
+// ClaimLockCodeSend mirrors the SQL: stamp only when lock_code_sent_at is still
+// NULL, and report whether this caller won the claim.
+func (f *fakeBookingRepo) ClaimLockCodeSend(_ context.Context, id uint, at time.Time) (bool, error) {
+	if f.beforeClaim != nil {
+		f.beforeClaim()
+	}
+	b, ok := f.rows[id]
+	if !ok || b.LockCodeSentAt != nil {
+		return false, nil
+	}
+	b.LockCodeSentAt = &at
+	f.claimCalls++
+	return true, nil
+}
+
+func (f *fakeBookingRepo) ReleaseLockCodeSend(_ context.Context, id uint) error {
+	if b, ok := f.rows[id]; ok {
+		b.LockCodeSentAt = nil
+	}
+	f.releaseCalls++
 	return nil
 }
 
@@ -326,6 +379,25 @@ func TestCancelRejectsAlreadyCancelled(t *testing.T) {
 	}
 }
 
+func TestCancelRejectsTerminalStatuses(t *testing.T) {
+	for _, status := range []string{model.BookingStatusCompleted, model.BookingStatusNoShow} {
+		t.Run(status, func(t *testing.T) {
+			uc, d := newTestUseCase()
+			b := d.bookings.seed(&model.Booking{HomeID: 1, Status: status})
+
+			err := uc.Cancel(context.Background(), b.ID)
+			e, ok := apperr.As(err)
+			if !ok || e.Code != apperr.CodeValidation {
+				t.Fatalf("Cancel() error = %v, want CodeValidation", err)
+			}
+			if b.Status != status {
+				t.Errorf("Status = %q, want %q unchanged: the payment behind a finished stay is already counted as revenue and there is nothing to refund from",
+					b.Status, status)
+			}
+		})
+	}
+}
+
 func TestCancelDeletesCalendarEvent(t *testing.T) {
 	uc, d := newTestUseCase()
 	b := d.bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusConfirmed, GoogleCalendarEventID: "evt-9"})
@@ -333,8 +405,8 @@ func TestCancelDeletesCalendarEvent(t *testing.T) {
 	if err := uc.Cancel(context.Background(), b.ID); err != nil {
 		t.Fatalf("Cancel() error = %v", err)
 	}
-	if b.Status != model.BookingStatusCancelled {
-		t.Errorf("Status = %q, want %q", b.Status, model.BookingStatusCancelled)
+	if stored := d.bookings.rows[b.ID]; stored.Status != model.BookingStatusCancelled {
+		t.Errorf("Status = %q, want %q", stored.Status, model.BookingStatusCancelled)
 	}
 	if d.calendar.deleteCalls != 1 || d.calendar.deletedEvent != "evt-9" {
 		t.Errorf("DeleteEvent calls = %d, event = %q; want 1, evt-9", d.calendar.deleteCalls, d.calendar.deletedEvent)
@@ -379,7 +451,7 @@ func TestCompleteAcceptsBookingThatHasStarted(t *testing.T) {
 	if err := uc.Complete(context.Background(), b.ID); err != nil {
 		t.Fatalf("Complete() error = %v, want nil for a booking already underway", err)
 	}
-	if b.Status != model.BookingStatusCompleted {
-		t.Errorf("Status = %q, want %q", b.Status, model.BookingStatusCompleted)
+	if stored := d.bookings.rows[b.ID]; stored.Status != model.BookingStatusCompleted {
+		t.Errorf("Status = %q, want %q", stored.Status, model.BookingStatusCompleted)
 	}
 }

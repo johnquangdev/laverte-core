@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	apperr "github.com/johnquangdev/laverte-home/errors"
 	"github.com/johnquangdev/laverte-home/model"
@@ -32,6 +33,31 @@ func TestSetLockCodeStoresCode(t *testing.T) {
 	}
 	if b.DoorLockCode == nil || *b.DoorLockCode != "4321" {
 		t.Errorf("DoorLockCode = %v, want 4321", b.DoorLockCode)
+	}
+	if d.bookings.setCodeCalls != 1 || d.bookings.updateCalls != 0 {
+		t.Errorf("setCodeCalls=%d updateCalls=%d, want 1/0: the code must be written as a single column, not through a full-row Save",
+			d.bookings.setCodeCalls, d.bookings.updateCalls)
+	}
+}
+
+// A full-row Save from a snapshot read before the alert sweep ran would silently
+// reset LockCodeAlertSentAt and re-alert the admin. afterGetByID fires the sweep's
+// write on the stored row after SetLockCode's own read has already taken its
+// (unalerted) snapshot, so a regression to Update would overwrite it with nil — a
+// value assertion taken before the read starts would miss that race entirely.
+func TestSetLockCodeLeavesAlertTimestampAlone(t *testing.T) {
+	uc, d := newTestUseCase()
+	b := d.bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusConfirmed})
+
+	alerted := time.Now().Add(-time.Hour)
+	d.bookings.afterGetByID = func(stored *model.Booking) { stored.LockCodeAlertSentAt = &alerted }
+
+	if err := uc.SetLockCode(context.Background(), b.ID, "4321"); err != nil {
+		t.Fatalf("SetLockCode() error = %v", err)
+	}
+	stored := d.bookings.rows[b.ID]
+	if stored.LockCodeAlertSentAt == nil || !stored.LockCodeAlertSentAt.Equal(alerted) {
+		t.Errorf("LockCodeAlertSentAt = %v, want %v unchanged", stored.LockCodeAlertSentAt, alerted)
 	}
 }
 
@@ -69,7 +95,45 @@ func TestSendLockCodeSendsOnlyOnce(t *testing.T) {
 		t.Errorf("notifier.LockCode calls = %d, want 1", d.notifier.lockCodeCalls)
 	}
 	if !b.LockCodeSentAt.Equal(firstSentAt) {
-		t.Errorf("LockCodeSentAt changed on second call: %v -> %v, want unchanged", firstSentAt, b.LockCodeSentAt)
+		t.Errorf("LockCodeSentAt moved %v -> %v; the second call must not re-stamp", firstSentAt, b.LockCodeSentAt)
+	}
+	// One claim, no full-row Save: a door code is a physical-access credential, so the
+	// send must be gated by the DB claim rather than by a read-then-write.
+	if d.bookings.claimCalls != 1 || d.bookings.updateCalls != 0 {
+		t.Errorf("claimCalls=%d updateCalls=%d, want 1/0", d.bookings.claimCalls, d.bookings.updateCalls)
+	}
+}
+
+// The admin's send races the Task 17 sweep. Whoever loses the claim must not send a
+// second copy of the code, even though it read LockCodeSentAt as nil.
+func TestSendLockCodeSkipsWhenClaimLost(t *testing.T) {
+	uc, d := newTestUseCase()
+	code := "1357"
+	b := d.bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusConfirmed, DoorLockCode: &code})
+
+	sentAt := time.Now().Add(-time.Minute)
+	d.bookings.beforeClaim = func() { b.LockCodeSentAt = &sentAt }
+
+	if err := uc.SendLockCode(context.Background(), b.ID); err != nil {
+		t.Fatalf("SendLockCode() error = %v", err)
+	}
+	if d.notifier.lockCodeCalls != 0 {
+		t.Errorf("notifier.LockCode calls = %d, want 0 — the claim was lost", d.notifier.lockCodeCalls)
+	}
+}
+
+func TestSendLockCodeRejectsCancelledBooking(t *testing.T) {
+	uc, d := newTestUseCase()
+	code := "9999"
+	b := d.bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusCancelled, DoorLockCode: &code})
+
+	err := uc.SendLockCode(context.Background(), b.ID)
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeValidation {
+		t.Fatalf("SendLockCode() error = %v, want CodeValidation", err)
+	}
+	if d.notifier.lockCodeCalls != 0 {
+		t.Errorf("notifier.LockCode calls = %d, want 0 — a cancelled stay must not receive the door code", d.notifier.lockCodeCalls)
 	}
 }
 
@@ -84,5 +148,9 @@ func TestSendLockCodePropagatesNotifierError(t *testing.T) {
 	}
 	if b.LockCodeSentAt != nil {
 		t.Errorf("LockCodeSentAt = %v, want nil so a retry can still deliver", b.LockCodeSentAt)
+	}
+	if d.bookings.releaseCalls != 1 {
+		t.Errorf("releaseCalls = %d, want 1: the claim must be handed back or the booking looks sent while nothing arrived",
+			d.bookings.releaseCalls)
 	}
 }

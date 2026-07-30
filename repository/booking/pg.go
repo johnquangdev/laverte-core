@@ -99,8 +99,24 @@ func (r *pgRepository) MarkLockCodeAlertSent(ctx context.Context, id uint, at ti
 		Update("lock_code_alert_sent_at", at).Error
 }
 
-func (r *pgRepository) MarkLockCodeSent(ctx context.Context, id uint, at time.Time) error {
+func (r *pgRepository) SetDoorLockCode(ctx context.Context, id uint, code string) error {
 	return r.getDB(ctx).Model(&model.Booking{}).
 		Where("id = ?", id).
-		Update("lock_code_sent_at", at).Error
+		Update("door_lock_code", code).Error
+}
+
+func (r *pgRepository) ClaimLockCodeSend(ctx context.Context, id uint, at time.Time) (bool, error) {
+	res := r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ? AND lock_code_sent_at IS NULL", id).
+		Update("lock_code_sent_at", at)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+func (r *pgRepository) ReleaseLockCodeSend(ctx context.Context, id uint) error {
+	return r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ?", id).
+		Update("lock_code_sent_at", nil).Error
 }

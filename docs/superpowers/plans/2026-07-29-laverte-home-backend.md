@@ -5157,13 +5157,21 @@ type IRepository interface {
 	// ListReadyToSendLockCode returns confirmed bookings whose start_time has
 	// already passed, that have a door_lock_code set, and haven't been sent yet.
 	ListReadyToSendLockCode(ctx context.Context, now time.Time) ([]*model.Booking, error)
-	// MarkLockCodeAlertSent and MarkLockCodeSent write one column each, unlike
-	// Update's Save() which rewrites every column from an in-memory snapshot. The
-	// lock-code sweeps run on a timer while an admin may be cancelling the same
-	// booking; a read-modify-Save from either side would silently discard the
-	// other's change.
+	// These write one column each, unlike Update's Save() which rewrites every column
+	// from an in-memory snapshot. The lock-code sweeps run on a timer while an admin
+	// may be acting on the same booking; a read-modify-Save from either side would
+	// silently discard the other's change.
 	MarkLockCodeAlertSent(ctx context.Context, id uint, at time.Time) error
-	MarkLockCodeSent(ctx context.Context, id uint, at time.Time) error
+	SetDoorLockCode(ctx context.Context, id uint, code string) error
+
+	// ClaimLockCodeSend stamps lock_code_sent_at only if it is still NULL, reporting
+	// whether this caller won. A door code is a physical-access credential, so
+	// read-check-send-then-mark is not enough: two in-flight sends (a double-clicked
+	// button, or two cron instances) would both see NULL and both deliver it. The
+	// caller sends only when this returns true, and calls ReleaseLockCodeSend if the
+	// send then fails, so a retry can still deliver.
+	ClaimLockCodeSend(ctx context.Context, id uint, at time.Time) (bool, error)
+	ReleaseLockCodeSend(ctx context.Context, id uint) error
 }
 ```
 
@@ -5269,10 +5277,26 @@ func (r *pgRepository) MarkLockCodeAlertSent(ctx context.Context, id uint, at ti
 		Update("lock_code_alert_sent_at", at).Error
 }
 
-func (r *pgRepository) MarkLockCodeSent(ctx context.Context, id uint, at time.Time) error {
+func (r *pgRepository) SetDoorLockCode(ctx context.Context, id uint, code string) error {
 	return r.getDB(ctx).Model(&model.Booking{}).
 		Where("id = ?", id).
-		Update("lock_code_sent_at", at).Error
+		Update("door_lock_code", code).Error
+}
+
+func (r *pgRepository) ClaimLockCodeSend(ctx context.Context, id uint, at time.Time) (bool, error) {
+	res := r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ? AND lock_code_sent_at IS NULL", id).
+		Update("lock_code_sent_at", at)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+func (r *pgRepository) ReleaseLockCodeSend(ctx context.Context, id uint) error {
+	return r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ?", id).
+		Update("lock_code_sent_at", nil).Error
 }
 ```
 
@@ -7355,19 +7379,21 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 	return 0, nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
-		b.LockCodeAlertSentAt = &at
-	}
+func (f *fakeBookingRepo) MarkLockCodeAlertSent(context.Context, uint, time.Time) error {
 	return nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
-		b.LockCodeSentAt = &at
-	}
-	return nil
+// SetDoorLockCode, ClaimLockCodeSend and ReleaseLockCodeSend satisfy the interface
+// only; this package's tests exercise booking creation, not the lock-code flow.
+// SetDoorLockCode, ClaimLockCodeSend and ReleaseLockCodeSend satisfy the interface
+// only; this package's tests exercise the SePay webhook, not the lock-code flow.
+func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error { return nil }
+
+func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
+	return true, nil
 }
+
+func (f *fakeBookingRepo) ReleaseLockCodeSend(context.Context, uint) error { return nil }
 
 type fakeHomeRepo struct{ home *model.Home }
 
@@ -8214,19 +8240,17 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 	return 0, nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
-		b.LockCodeAlertSentAt = &at
-	}
+func (f *fakeBookingRepo) MarkLockCodeAlertSent(context.Context, uint, time.Time) error {
 	return nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
-		b.LockCodeSentAt = &at
-	}
-	return nil
+func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error { return nil }
+
+func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
+	return true, nil
 }
+
+func (f *fakeBookingRepo) ReleaseLockCodeSend(context.Context, uint) error { return nil }
 
 type fakePaymentRepo struct {
 	payment   *model.Payment
@@ -9832,8 +9856,15 @@ func (uc *UseCase) Cancel(ctx context.Context, id uint) error {
 	if err != nil {
 		return apperr.NotFound(err)
 	}
-	if b.Status == model.BookingStatusCancelled || b.Status == model.BookingStatusExpired {
+	switch b.Status {
+	case model.BookingStatusCancelled, model.BookingStatusExpired:
 		return apperr.Validation("booking da huy hoac da het han")
+	case model.BookingStatusCompleted, model.BookingStatusNoShow:
+		// These are terminal and the payment behind them is already counted as
+		// revenue. There is no refund concept in this system, so flipping one to
+		// cancelled would leave the ledger saying paid and the booking saying it
+		// never happened, with nothing to reconcile from.
+		return apperr.Validation("booking da ket thuc, khong the huy")
 	}
 
 	b.Status = model.BookingStatusCancelled
@@ -9901,6 +9932,8 @@ import (
 	"context"
 	"time"
 
+	"go.uber.org/zap"
+
 	apperr "github.com/johnquangdev/laverte-home/errors"
 	"github.com/johnquangdev/laverte-home/model"
 )
@@ -9914,8 +9947,10 @@ func (uc *UseCase) SetLockCode(ctx context.Context, id uint, code string) error 
 		return apperr.Validation("chi booking dang 'confirmed' moi nhap duoc ma khoa")
 	}
 
-	b.DoorLockCode = &code
-	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+	// One column, not Update's Save-every-column: the Task 17 alert sweep writes
+	// LockCodeAlertSentAt on a timer, and a read-modify-Save from here would reset it
+	// from a snapshot taken before the sweep ran, re-alerting the admin.
+	if err := uc.bookingRepo.SetDoorLockCode(ctx, b.ID, code); err != nil {
 		return apperr.Internal(err)
 	}
 	return nil
@@ -9926,26 +9961,36 @@ func (uc *UseCase) SendLockCode(ctx context.Context, id uint) error {
 	if err != nil {
 		return apperr.NotFound(err)
 	}
+	// Cancelling a booking does not clear DoorLockCode, so without this check the
+	// code could still be sent to a guest whose stay was cancelled — handing
+	// physical access to the property to someone with no booking.
+	if b.Status != model.BookingStatusConfirmed {
+		return apperr.Validation("chi gui duoc ma khoa cho booking dang 'confirmed'")
+	}
 	if b.DoorLockCode == nil {
 		return apperr.Validation("chua co ma khoa")
 	}
-	if b.LockCodeSentAt != nil {
-		return nil
-	}
 
-	// Unlike the webhook's best-effort notification, a failure here is returned:
-	// an admin pressed "send now" while the guest waits at the door and must see
-	// that the message did not go out. LockCodeSentAt stays nil so the cron (or a
-	// retry) can still deliver it.
-	if err := uc.notifier.LockCode(ctx, b, *b.DoorLockCode); err != nil {
+	// Claim first, then send. Checking LockCodeSentAt above and stamping it after the
+	// send would leave a window where a double-clicked button, or this call racing the
+	// Task 17 sweep, both see NULL and both deliver the code.
+	claimed, err := uc.bookingRepo.ClaimLockCodeSend(ctx, b.ID, time.Now())
+	if err != nil {
 		return apperr.Internal(err)
 	}
+	if !claimed {
+		return nil // already sent, or another in-flight send won the claim
+	}
 
-	// One column, not Update's Save-every-column: the Task 17 sweep writes this same
-	// field on a timer, and a read-modify-Save from here would overwrite its value
-	// from a snapshot taken before it ran — resetting LockCodeSentAt and sending the
-	// door code a second time.
-	if err := uc.bookingRepo.MarkLockCodeSent(ctx, b.ID, time.Now()); err != nil {
+	// Unlike the webhook's best-effort notification, a failure here is returned: an
+	// admin pressed "send now" while the guest waits at the door and must see that
+	// the message did not go out. Release the claim so a retry — or the sweep — can
+	// still deliver; otherwise the booking would look sent while nothing arrived.
+	if err := uc.notifier.LockCode(ctx, b, *b.DoorLockCode); err != nil {
+		if rerr := uc.bookingRepo.ReleaseLockCodeSend(ctx, b.ID); rerr != nil {
+			uc.log.Error("lock-code send failed and the claim could not be released",
+				zap.Uint("booking_id", b.ID), zap.Error(rerr))
+		}
 		return apperr.Internal(err)
 	}
 	return nil
@@ -9976,6 +10021,24 @@ type fakeBookingRepo struct {
 	nextID     uint
 	createErr  error
 	updateErrs map[uint]error
+
+	// Call counters. The lock-code paths deliberately avoid the full-row Update, so
+	// the tests assert on which method ran — without that, a regression back to
+	// Update would leave every value-based assertion still passing.
+	updateCalls  int
+	setCodeCalls int
+	claimCalls   int
+	releaseCalls int
+
+	// beforeClaim runs inside ClaimLockCodeSend, standing in for another writer
+	// winning the claim between the caller's read and its own attempt.
+	beforeClaim func()
+
+	// afterGetByID runs inside GetByID, given the stored row rather than the copy
+	// handed to the caller — it stands in for a concurrent writer (e.g. the alert
+	// sweep) landing its own change on the DB row between this read and whatever
+	// write the caller makes from its now-stale copy.
+	afterGetByID func(stored *model.Booking)
 }
 
 func newFakeBookingRepo() *fakeBookingRepo {
@@ -9997,12 +10060,22 @@ func (f *fakeBookingRepo) Create(_ context.Context, b *model.Booking) error {
 	return nil
 }
 
+// GetByID returns a copy, mirroring GORM's First: the caller's local struct is
+// a snapshot from read time, not a live view of the row. Without that, no fake
+// Update could ever be shown to lose a concurrent column write, since it would
+// just be re-storing the exact object the rest of the test still holds.
+// afterGetByID fires after the snapshot is taken, so it can land a write that
+// the snapshot — and therefore any Update built from it — will not see.
 func (f *fakeBookingRepo) GetByID(_ context.Context, id uint) (*model.Booking, error) {
 	b, ok := f.rows[id]
 	if !ok {
 		return nil, errors.New("booking not found")
 	}
-	return b, nil
+	cp := *b
+	if f.afterGetByID != nil {
+		f.afterGetByID(b)
+	}
+	return &cp, nil
 }
 
 func (f *fakeBookingRepo) Update(_ context.Context, b *model.Booking) error {
@@ -10010,6 +10083,7 @@ func (f *fakeBookingRepo) Update(_ context.Context, b *model.Booking) error {
 		return err
 	}
 	f.rows[b.ID] = b
+	f.updateCalls++
 	return nil
 }
 
@@ -10042,16 +10116,40 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 }
 
 func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
+	if b, ok := f.rows[id]; ok {
 		b.LockCodeAlertSentAt = &at
 	}
 	return nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
-		b.LockCodeSentAt = &at
+func (f *fakeBookingRepo) SetDoorLockCode(_ context.Context, id uint, code string) error {
+	if b, ok := f.rows[id]; ok {
+		b.DoorLockCode = &code
 	}
+	f.setCodeCalls++
+	return nil
+}
+
+// ClaimLockCodeSend mirrors the SQL: stamp only when lock_code_sent_at is still
+// NULL, and report whether this caller won the claim.
+func (f *fakeBookingRepo) ClaimLockCodeSend(_ context.Context, id uint, at time.Time) (bool, error) {
+	if f.beforeClaim != nil {
+		f.beforeClaim()
+	}
+	b, ok := f.rows[id]
+	if !ok || b.LockCodeSentAt != nil {
+		return false, nil
+	}
+	b.LockCodeSentAt = &at
+	f.claimCalls++
+	return true, nil
+}
+
+func (f *fakeBookingRepo) ReleaseLockCodeSend(_ context.Context, id uint) error {
+	if b, ok := f.rows[id]; ok {
+		b.LockCodeSentAt = nil
+	}
+	f.releaseCalls++
 	return nil
 }
 
@@ -10284,6 +10382,25 @@ func TestCancelRejectsAlreadyCancelled(t *testing.T) {
 	}
 }
 
+func TestCancelRejectsTerminalStatuses(t *testing.T) {
+	for _, status := range []string{model.BookingStatusCompleted, model.BookingStatusNoShow} {
+		t.Run(status, func(t *testing.T) {
+			uc, d := newTestUseCase()
+			b := d.bookings.seed(&model.Booking{HomeID: 1, Status: status})
+
+			err := uc.Cancel(context.Background(), b.ID)
+			e, ok := apperr.As(err)
+			if !ok || e.Code != apperr.CodeValidation {
+				t.Fatalf("Cancel() error = %v, want CodeValidation", err)
+			}
+			if b.Status != status {
+				t.Errorf("Status = %q, want %q unchanged: the payment behind a finished stay is already counted as revenue and there is nothing to refund from",
+					b.Status, status)
+			}
+		})
+	}
+}
+
 func TestCancelDeletesCalendarEvent(t *testing.T) {
 	uc, d := newTestUseCase()
 	b := d.bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusConfirmed, GoogleCalendarEventID: "evt-9"})
@@ -10291,8 +10408,8 @@ func TestCancelDeletesCalendarEvent(t *testing.T) {
 	if err := uc.Cancel(context.Background(), b.ID); err != nil {
 		t.Fatalf("Cancel() error = %v", err)
 	}
-	if b.Status != model.BookingStatusCancelled {
-		t.Errorf("Status = %q, want %q", b.Status, model.BookingStatusCancelled)
+	if stored := d.bookings.rows[b.ID]; stored.Status != model.BookingStatusCancelled {
+		t.Errorf("Status = %q, want %q", stored.Status, model.BookingStatusCancelled)
 	}
 	if d.calendar.deleteCalls != 1 || d.calendar.deletedEvent != "evt-9" {
 		t.Errorf("DeleteEvent calls = %d, event = %q; want 1, evt-9", d.calendar.deleteCalls, d.calendar.deletedEvent)
@@ -10320,6 +10437,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	apperr "github.com/johnquangdev/laverte-home/errors"
 	"github.com/johnquangdev/laverte-home/model"
@@ -10349,6 +10467,31 @@ func TestSetLockCodeStoresCode(t *testing.T) {
 	if b.DoorLockCode == nil || *b.DoorLockCode != "4321" {
 		t.Errorf("DoorLockCode = %v, want 4321", b.DoorLockCode)
 	}
+	if d.bookings.setCodeCalls != 1 || d.bookings.updateCalls != 0 {
+		t.Errorf("setCodeCalls=%d updateCalls=%d, want 1/0: the code must be written as a single column, not through a full-row Save",
+			d.bookings.setCodeCalls, d.bookings.updateCalls)
+	}
+}
+
+// A full-row Save from a snapshot read before the alert sweep ran would silently
+// reset LockCodeAlertSentAt and re-alert the admin. afterGetByID fires the sweep's
+// write on the stored row after SetLockCode's own read has already taken its
+// (unalerted) snapshot, so a regression to Update would overwrite it with nil — a
+// value assertion taken before the read starts would miss that race entirely.
+func TestSetLockCodeLeavesAlertTimestampAlone(t *testing.T) {
+	uc, d := newTestUseCase()
+	b := d.bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusConfirmed})
+
+	alerted := time.Now().Add(-time.Hour)
+	d.bookings.afterGetByID = func(stored *model.Booking) { stored.LockCodeAlertSentAt = &alerted }
+
+	if err := uc.SetLockCode(context.Background(), b.ID, "4321"); err != nil {
+		t.Fatalf("SetLockCode() error = %v", err)
+	}
+	stored := d.bookings.rows[b.ID]
+	if stored.LockCodeAlertSentAt == nil || !stored.LockCodeAlertSentAt.Equal(alerted) {
+		t.Errorf("LockCodeAlertSentAt = %v, want %v unchanged", stored.LockCodeAlertSentAt, alerted)
+	}
 }
 
 func TestSendLockCodeRejectsMissingCode(t *testing.T) {
@@ -10376,11 +10519,54 @@ func TestSendLockCodeSendsOnlyOnce(t *testing.T) {
 	if b.LockCodeSentAt == nil {
 		t.Fatal("LockCodeSentAt = nil after send, want a timestamp")
 	}
+	firstSentAt := *b.LockCodeSentAt
+
 	if err := uc.SendLockCode(context.Background(), b.ID); err != nil {
 		t.Fatalf("second SendLockCode() error = %v", err)
 	}
 	if d.notifier.lockCodeCalls != 1 {
 		t.Errorf("notifier.LockCode calls = %d, want 1", d.notifier.lockCodeCalls)
+	}
+	if !b.LockCodeSentAt.Equal(firstSentAt) {
+		t.Errorf("LockCodeSentAt moved %v -> %v; the second call must not re-stamp", firstSentAt, b.LockCodeSentAt)
+	}
+	// One claim, no full-row Save: a door code is a physical-access credential, so the
+	// send must be gated by the DB claim rather than by a read-then-write.
+	if d.bookings.claimCalls != 1 || d.bookings.updateCalls != 0 {
+		t.Errorf("claimCalls=%d updateCalls=%d, want 1/0", d.bookings.claimCalls, d.bookings.updateCalls)
+	}
+}
+
+// The admin's send races the Task 17 sweep. Whoever loses the claim must not send a
+// second copy of the code, even though it read LockCodeSentAt as nil.
+func TestSendLockCodeSkipsWhenClaimLost(t *testing.T) {
+	uc, d := newTestUseCase()
+	code := "1357"
+	b := d.bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusConfirmed, DoorLockCode: &code})
+
+	sentAt := time.Now().Add(-time.Minute)
+	d.bookings.beforeClaim = func() { b.LockCodeSentAt = &sentAt }
+
+	if err := uc.SendLockCode(context.Background(), b.ID); err != nil {
+		t.Fatalf("SendLockCode() error = %v", err)
+	}
+	if d.notifier.lockCodeCalls != 0 {
+		t.Errorf("notifier.LockCode calls = %d, want 0 — the claim was lost", d.notifier.lockCodeCalls)
+	}
+}
+
+func TestSendLockCodeRejectsCancelledBooking(t *testing.T) {
+	uc, d := newTestUseCase()
+	code := "9999"
+	b := d.bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusCancelled, DoorLockCode: &code})
+
+	err := uc.SendLockCode(context.Background(), b.ID)
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeValidation {
+		t.Fatalf("SendLockCode() error = %v, want CodeValidation", err)
+	}
+	if d.notifier.lockCodeCalls != 0 {
+		t.Errorf("notifier.LockCode calls = %d, want 0 — a cancelled stay must not receive the door code", d.notifier.lockCodeCalls)
 	}
 }
 
@@ -10396,13 +10582,17 @@ func TestSendLockCodePropagatesNotifierError(t *testing.T) {
 	if b.LockCodeSentAt != nil {
 		t.Errorf("LockCodeSentAt = %v, want nil so a retry can still deliver", b.LockCodeSentAt)
 	}
+	if d.bookings.releaseCalls != 1 {
+		t.Errorf("releaseCalls = %d, want 1: the claim must be handed back or the booking looks sent while nothing arrived",
+			d.bookings.releaseCalls)
+	}
 }
 ```
 
 - [ ] **Step 9: Run the usecase tests**
 
 Run: `go test ./usecase/bookingadmin/... -v`
-Expected: PASS — all 11 tests across `usecase_test.go` and `lock_code_test.go`.
+Expected: PASS — all 16 tests across `usecase_test.go` and `lock_code_test.go`.
 
 - [ ] **Step 10: Write `delivery/http/admin/booking_handler.go`**
 
@@ -10606,7 +10796,7 @@ git commit -m "feat: admin booking ops — walk-in, cancel/complete/no-show, loc
 - Modify: `cmd/main.go` — start/stop the cron registry
 
 **Interfaces:**
-- Consumes: `bookingrepo.IRepository` (`ListExpiredPending`, `ListUpcomingMissingLockCode`, `ListReadyToSendLockCode`, `Update`) (Task 9); `paymentrepo.IRepository` (Task 13); `notify.INotifier` (Task 14); `cfg.BookingCheckinAlertLeadMinutes` (Task 1).
+- Consumes: `bookingrepo.IRepository` (`ListExpiredPending`, `ListUpcomingMissingLockCode`, `ListReadyToSendLockCode`, `MarkLockCodeAlertSent`, `ClaimLockCodeSend`, `ReleaseLockCodeSend`, `Update`) (Task 9); `paymentrepo.IRepository` (Task 13); `notify.INotifier` (Task 14); `cfg.BookingCheckinAlertLeadMinutes` (Task 1).
 - Produces: `paymentrepo.MarkExpiredIfPending`; `bookingjobsuc.IUseCase` (`ExpirePendingBookings`, `AlertMissingLockCodes`, `SendDueLockCodes`); `job.New(uc, log) *Job`, `(*Job).Start()`, `(*Job).Stop()`.
 
 - [ ] **Step 1: Modify `repository/payment/interface.go`** — append one method to `IRepository`
@@ -10741,10 +10931,10 @@ func (uc *UseCase) AlertMissingLockCodes(ctx context.Context) error {
 			continue
 		}
 		// LockCodeAlertSentAt is the only thing keeping this from re-alerting on
-		// every tick, so it is written only after the alert actually went out.
-		now := time.Now()
-		b.LockCodeAlertSentAt = &now
-		if err := uc.bookingRepo.Update(ctx, b); err != nil {
+		// every tick, so it is written only after the alert actually went out — and as
+		// a single column, since the admin may be setting DoorLockCode on this same row
+		// right now and a full-row Save would write it back to the value this loop read.
+		if err := uc.bookingRepo.MarkLockCodeAlertSent(ctx, b.ID, time.Now()); err != nil {
 			uc.log.Error("mark lock-code alert sent failed", zap.Uint("booking_id", b.ID), zap.Error(err))
 		}
 	}
@@ -10762,14 +10952,25 @@ func (uc *UseCase) SendDueLockCodes(ctx context.Context) error {
 			uc.log.Warn("booking queued for lock-code send has no code", zap.Uint("booking_id", b.ID))
 			continue
 		}
-		if err := uc.notifier.LockCode(ctx, b, *b.DoorLockCode); err != nil {
-			uc.log.Error("lock-code send failed", zap.Uint("booking_id", b.ID), zap.Error(err))
+		// Claim before sending. The admin's "send now" button reads the same row, so
+		// deciding from this loop's snapshot and stamping afterwards would let both
+		// deliver — two copies of a physical-access credential.
+		claimed, err := uc.bookingRepo.ClaimLockCodeSend(ctx, b.ID, time.Now())
+		if err != nil {
+			uc.log.Error("claim lock-code send failed", zap.Uint("booking_id", b.ID), zap.Error(err))
 			continue
 		}
-		now := time.Now()
-		b.LockCodeSentAt = &now
-		if err := uc.bookingRepo.Update(ctx, b); err != nil {
-			uc.log.Error("mark lock-code sent failed", zap.Uint("booking_id", b.ID), zap.Error(err))
+		if !claimed {
+			continue
+		}
+		if err := uc.notifier.LockCode(ctx, b, *b.DoorLockCode); err != nil {
+			uc.log.Error("lock-code send failed", zap.Uint("booking_id", b.ID), zap.Error(err))
+			// Hand the claim back so the next tick retries; otherwise the row reads as
+			// sent and the guest reaches a locked door with no code.
+			if rerr := uc.bookingRepo.ReleaseLockCodeSend(ctx, b.ID); rerr != nil {
+				uc.log.Error("release lock-code claim failed", zap.Uint("booking_id", b.ID), zap.Error(rerr))
+			}
+			continue
 		}
 	}
 	return nil
@@ -10797,6 +10998,11 @@ type fakeBookingRepo struct {
 	rows       map[uint]*model.Booking
 	nextID     uint
 	updateErrs map[uint]error
+
+	updateCalls  int
+	setCodeCalls int
+	claimCalls   int
+	releaseCalls int
 }
 
 func newFakeBookingRepo() *fakeBookingRepo {
@@ -10885,16 +11091,37 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 }
 
 func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
+	if b, ok := f.rows[id]; ok {
 		b.LockCodeAlertSentAt = &at
 	}
 	return nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
-		b.LockCodeSentAt = &at
+func (f *fakeBookingRepo) SetDoorLockCode(_ context.Context, id uint, code string) error {
+	if b, ok := f.rows[id]; ok {
+		b.DoorLockCode = &code
 	}
+	f.setCodeCalls++
+	return nil
+}
+
+// ClaimLockCodeSend mirrors the SQL: stamp only when lock_code_sent_at is still
+// NULL, and report whether this caller won the claim.
+func (f *fakeBookingRepo) ClaimLockCodeSend(_ context.Context, id uint, at time.Time) (bool, error) {
+	b, ok := f.rows[id]
+	if !ok || b.LockCodeSentAt != nil {
+		return false, nil
+	}
+	b.LockCodeSentAt = &at
+	f.claimCalls++
+	return true, nil
+}
+
+func (f *fakeBookingRepo) ReleaseLockCodeSend(_ context.Context, id uint) error {
+	if b, ok := f.rows[id]; ok {
+		b.LockCodeSentAt = nil
+	}
+	f.releaseCalls++
 	return nil
 }
 
@@ -10949,13 +11176,14 @@ func (f *fakePaymentRepo) MarkExpiredIfPending(_ context.Context, paymentID uint
 
 type fakeNotifier struct {
 	lockCodeCalls int
+	lockCodeErr   error
 	alertCalls    int
 }
 
 func (f *fakeNotifier) BookingConfirmed(context.Context, *model.Booking) error { return nil }
 func (f *fakeNotifier) LockCode(context.Context, *model.Booking, string) error {
 	f.lockCodeCalls++
-	return nil
+	return f.lockCodeErr
 }
 func (f *fakeNotifier) AdminLockCodeMissing(context.Context, *model.Booking) error {
 	f.alertCalls++
@@ -11065,13 +11293,39 @@ func TestSendDueLockCodesSendsAndMarks(t *testing.T) {
 	if noCode.LockCodeSentAt != nil {
 		t.Error("LockCodeSentAt set for a booking with no code, want nil")
 	}
+	if bookings.claimCalls != 1 || bookings.updateCalls != 0 {
+		t.Errorf("claimCalls=%d updateCalls=%d, want 1/0: the send must be gated by the DB claim, not by a full-row Save",
+			bookings.claimCalls, bookings.updateCalls)
+	}
+}
+
+// A send that fails must leave the row claimable, or the next tick skips it and the
+// guest arrives at a locked door with no code.
+func TestSendDueLockCodesReleasesClaimOnFailure(t *testing.T) {
+	uc, bookings, _, notifier := newTestUseCase()
+	code := "1234"
+	due := bookings.seed(&model.Booking{
+		HomeID: 1, Status: model.BookingStatusConfirmed,
+		StartTime: time.Now().Add(-time.Minute), DoorLockCode: &code,
+	})
+	notifier.lockCodeErr = errors.New("zns down")
+
+	if err := uc.SendDueLockCodes(context.Background()); err != nil {
+		t.Fatalf("SendDueLockCodes() error = %v, want nil (per-row failures are logged)", err)
+	}
+	if due.LockCodeSentAt != nil {
+		t.Errorf("LockCodeSentAt = %v, want nil so the next tick retries", due.LockCodeSentAt)
+	}
+	if bookings.releaseCalls != 1 {
+		t.Errorf("releaseCalls = %d, want 1", bookings.releaseCalls)
+	}
 }
 ```
 
 - [ ] **Step 6: Run the usecase tests**
 
 Run: `go test ./usecase/bookingjobs/... -v`
-Expected: PASS — 5 tests.
+Expected: PASS — 6 tests.
 
 - [ ] **Step 7: Write `delivery/job/job.go`** (thin registry, mirroring lumen's `delivery/job` shape)
 
@@ -11237,19 +11491,17 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 	return 0, nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
-		b.LockCodeAlertSentAt = &at
-	}
+func (f *fakeBookingRepo) MarkLockCodeAlertSent(context.Context, uint, time.Time) error {
 	return nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
-		b.LockCodeSentAt = &at
-	}
-	return nil
+func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error { return nil }
+
+func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
+	return true, nil
 }
+
+func (f *fakeBookingRepo) ReleaseLockCodeSend(context.Context, uint) error { return nil }
 ```
 
 - [ ] **Step 3: Write `presenter/overview.go`**

@@ -167,8 +167,15 @@ func (uc *UseCase) Cancel(ctx context.Context, id uint) error {
 	if err != nil {
 		return apperr.NotFound(err)
 	}
-	if b.Status == model.BookingStatusCancelled || b.Status == model.BookingStatusExpired {
+	switch b.Status {
+	case model.BookingStatusCancelled, model.BookingStatusExpired:
 		return apperr.Validation("booking da huy hoac da het han")
+	case model.BookingStatusCompleted, model.BookingStatusNoShow:
+		// These are terminal and the payment behind them is already counted as
+		// revenue. There is no refund concept in this system, so flipping one to
+		// cancelled would leave the ledger saying paid and the booking saying it
+		// never happened, with nothing to reconcile from.
+		return apperr.Validation("booking da ket thuc, khong the huy")
 	}
 
 	b.Status = model.BookingStatusCancelled

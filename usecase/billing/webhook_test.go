@@ -79,12 +79,15 @@ func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at t
 	return nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
-	if f.booking != nil && f.booking.ID == id {
-		f.booking.LockCodeSentAt = &at
-	}
-	return nil
+// SetDoorLockCode, ClaimLockCodeSend and ReleaseLockCodeSend satisfy the interface
+// only; this package's tests exercise the SePay webhook, not the lock-code flow.
+func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error { return nil }
+
+func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
+	return true, nil
 }
+
+func (f *fakeBookingRepo) ReleaseLockCodeSend(context.Context, uint) error { return nil }
 
 type fakePaymentRepo struct {
 	payment   *model.Payment

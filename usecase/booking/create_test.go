@@ -93,12 +93,15 @@ func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at t
 	return nil
 }
 
-func (f *fakeBookingRepo) MarkLockCodeSent(_ context.Context, id uint, at time.Time) error {
-	if b, ok := f.byID[id]; ok {
-		b.LockCodeSentAt = &at
-	}
-	return nil
+// SetDoorLockCode, ClaimLockCodeSend and ReleaseLockCodeSend satisfy the interface
+// only; this package's tests exercise booking creation, not the lock-code flow.
+func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error { return nil }
+
+func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
+	return true, nil
 }
+
+func (f *fakeBookingRepo) ReleaseLockCodeSend(context.Context, uint) error { return nil }
 
 type fakeHomeRepo struct{ home *model.Home }
 
