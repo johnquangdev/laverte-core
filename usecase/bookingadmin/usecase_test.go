@@ -157,6 +157,12 @@ func (f *fakeBookingRepo) ReleaseLockCodeSend(_ context.Context, id uint) error 
 	return nil
 }
 
+// CountConfirmedBetween satisfies the interface only; this package's tests
+// exercise the booking admin actions, not the revenue overview.
+func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time.Time) (int64, error) {
+	return 0, nil
+}
+
 type fakeHomeRepo struct{ homes map[uint]*model.Home }
 
 func (f *fakeHomeRepo) Create(_ context.Context, h *model.Home) error { f.homes[h.ID] = h; return nil }

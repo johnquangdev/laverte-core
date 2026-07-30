@@ -25,6 +25,7 @@ import (
 	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
 	bookingadminuc "github.com/johnquangdev/laverte-home/usecase/bookingadmin"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
+	overviewuc "github.com/johnquangdev/laverte-home/usecase/overview"
 	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-home/util/ratelimit"
 	"github.com/johnquangdev/laverte-home/util/tokenstore"
@@ -82,6 +83,7 @@ type Deps struct {
 	BookingUC         bookinguc.IUseCase
 	BookingAdminUC    bookingadminuc.IUseCase
 	BillingUC         billinguc.IUseCase
+	OverviewUC        overviewuc.IUseCase
 }
 
 func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
@@ -149,6 +151,7 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	adminhttp.InitPricingRules(adminGroup, deps.PricingAdminUC, handleErr, handleOK)
 	adminhttp.InitBlockedSlots(adminGroup, deps.BlockedSlotUC, handleErr, handleOK)
 	adminhttp.InitBookings(adminGroup, deps.BookingAdminUC, handleErr, handleOK)
+	adminhttp.InitOverview(adminGroup, deps.OverviewUC, handleErr, handleOK)
 
 	return &Server{echo: e, cfg: cfg, log: log}
 }

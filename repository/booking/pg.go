@@ -133,3 +133,12 @@ func (r *pgRepository) ReleaseLockCodeSend(ctx context.Context, id uint) error {
 		Where("id = ?", id).
 		Update("lock_code_sent_at", nil).Error
 }
+
+func (r *pgRepository) CountConfirmedBetween(ctx context.Context, from, to time.Time) (int64, error) {
+	var n int64
+	err := r.getDB(ctx).Model(&model.Booking{}).
+		Where("status IN ? AND start_time >= ? AND start_time < ?",
+			[]string{model.BookingStatusConfirmed, model.BookingStatusCompleted}, from, to).
+		Count(&n).Error
+	return n, err
+}

@@ -51,4 +51,8 @@ type IRepository interface {
 	// still deliver.
 	ClaimLockCodeSend(ctx context.Context, id uint, at time.Time) (bool, error)
 	ReleaseLockCodeSend(ctx context.Context, id uint) error
+
+	// CountConfirmedBetween counts bookings that actually occupy the property —
+	// confirmed plus completed — whose start_time falls in [from, to).
+	CountConfirmedBetween(ctx context.Context, from, to time.Time) (int64, error)
 }

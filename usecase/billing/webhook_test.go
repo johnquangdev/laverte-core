@@ -100,6 +100,12 @@ func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (b
 
 func (f *fakeBookingRepo) ReleaseLockCodeSend(context.Context, uint) error { return nil }
 
+// CountConfirmedBetween satisfies the interface only; this package's tests
+// exercise the SePay webhook, not the revenue overview.
+func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time.Time) (int64, error) {
+	return 0, nil
+}
+
 type fakePaymentRepo struct {
 	payment   *model.Payment
 	markOK    bool

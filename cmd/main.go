@@ -29,6 +29,7 @@ import (
 	bookingadminuc "github.com/johnquangdev/laverte-home/usecase/bookingadmin"
 	bookingjobsuc "github.com/johnquangdev/laverte-home/usecase/bookingjobs"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
+	overviewuc "github.com/johnquangdev/laverte-home/usecase/overview"
 	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
 	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-home/util/checkout"
@@ -85,6 +86,7 @@ func main() {
 
 	billingUC := billinguc.New(bookings, payments, sepay, notifier, calendarSvc, homes, log, *cfg)
 	bookingAdminUC := bookingadminuc.New(bookings, homes, blockedSlots, payments, pricingUC, notifier, calendarSvc, log)
+	overviewUC := overviewuc.New(payments, bookings)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
 		u, err := users.GetByID(ctx, userID)
@@ -106,6 +108,7 @@ func main() {
 		BookingUC:         bookingUC,
 		BookingAdminUC:    bookingAdminUC,
 		BillingUC:         billingUC,
+		OverviewUC:        overviewUC,
 	})
 
 	bookingJobsUC := bookingjobsuc.New(bookings, payments, notifier, log, *cfg)
