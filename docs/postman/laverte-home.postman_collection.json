@@ -1,0 +1,503 @@
+{
+  "info": {
+    "name": "laverte-home",
+    "_postman_id": "8f1a6b2e-2c4d-4a7a-9b3e-8a3f5b6c7d10",
+    "description": "Homestay booking backend. Run `docker compose -f docker-compose.dev.yml up -d`, `go run ./cmd/migrate`, then `go run ./cmd` before using this. Base URL defaults to http://localhost:14000 — override `base_url` under the collection's variables (or in an environment) if PORT differs.\n\nFlow to test end to end:\n1. Auth > Google Login URL, open it in a browser, sign in, copy `code`+`state` from the redirect and paste into Auth > Google Callback. This auto-fills `access_token`/`refresh_token`.\n2. Admin > Homes > Create Home, then Admin > Pricing Rules > Create (Hourly) and Create (Flat), so a booking has something to price against.\n3. Public > Create Booking — this returns `id`/`computed_price`, auto-filled into `booking_id`/`computed_price`.\n4. Webhooks > SePay Payment Received — signs itself with `sepay_webhook_secret` and settles the booking created in step 3.\n5. Admin > Bookings covers walk-ins, cancel/complete/no-show, and the door-code flow.\n\nAdmin routes need a user whose `role` is `admin` or `superadmin` in the `users` table — the first login just creates a row with `role='user'`, so promote it by hand once (`UPDATE users SET role='admin' WHERE email=...`) or through Admin > Roster > Grant Admin once one admin already exists.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:14000" },
+    { "key": "access_token", "value": "" },
+    { "key": "refresh_token", "value": "" },
+    { "key": "google_code", "value": "" },
+    { "key": "google_state", "value": "" },
+    { "key": "target_user_id", "value": "", "description": "users.id to grant/revoke admin — look it up in the DB, there is no list-users endpoint" },
+    { "key": "home_id", "value": "1" },
+    { "key": "pricing_rule_id", "value": "" },
+    { "key": "blocked_slot_id", "value": "" },
+    { "key": "booking_id", "value": "" },
+    { "key": "computed_price", "value": "" },
+    { "key": "admin_booking_id", "value": "" },
+    { "key": "sepay_webhook_secret", "value": "", "description": "must match SEPAY_WEBHOOK_SECRET in the running server's .env" },
+    { "key": "sepay_transfer_prefix", "value": "LAVERTE", "description": "must match SEPAY_TRANSFER_PREFIX" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{base_url}}/health"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Google Login URL",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{base_url}}/api/v1/auth/google/login-url",
+            "description": "Returns { url }. Open it in a real browser, sign in, and Google redirects to GOOGLE_REDIRECT_URI with ?code=...&state=.... Copy both into google_code/google_state below."
+          }
+        },
+        {
+          "name": "Google Callback",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    pm.collectionVariables.set('access_token', json.access_token);",
+                  "    pm.collectionVariables.set('refresh_token', json.refresh_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/auth/google/callback",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"code\": \"{{google_code}}\",\n    \"state\": \"{{google_state}}\"\n}"
+            },
+            "description": "Exchanges the OAuth code for a session. On 200, auto-fills access_token/refresh_token for the rest of the collection."
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    pm.collectionVariables.set('access_token', json.access_token);",
+                  "    pm.collectionVariables.set('refresh_token', json.refresh_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/auth/refresh",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"refresh_token\": \"{{refresh_token}}\"\n}"
+            },
+            "description": "Rotates the refresh token — the response's refresh_token replaces the old one. Reusing an already-rotated token revokes the whole family (theft detection)."
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/auth/logout",
+            "description": "Blacklists the current access token. Known gap (see docs/NEXT-STEPS.md): the refresh token itself is not revoked, so it keeps minting new access tokens until it expires."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Public - Booking",
+      "item": [
+        {
+          "name": "Create Booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    const json = pm.response.json();",
+                  "    pm.collectionVariables.set('booking_id', json.id);",
+                  "    pm.collectionVariables.set('computed_price', json.computed_price);",
+                  "    console.log('booking_id=' + json.id + ' computed_price=' + json.computed_price + ' qr=' + json.qr_content);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/bookings",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"home_id\": {{home_id}},\n    \"customer_name\": \"Nguyen Van A\",\n    \"customer_phone\": \"0900000001\",\n    \"start_time\": \"2026-08-01T10:00:00+07:00\",\n    \"end_time\": \"2026-08-01T13:00:00+07:00\",\n    \"booking_type\": \"hourly\"\n}"
+            },
+            "description": "No auth, no account — this is the guest entry point. booking_type is one of hourly/overnight/day. Rate-limited per IP and per (normalized) phone. Response is pending_payment with a VietQR qr_content and an expires_at; settle it with the SePay webhook request below, or let it expire on its own to see the 15-minute hold released.\n\nRe-submitting the same phone against the same home+window while a pending hold exists returns that same hold instead of creating a second one — try posting this twice in a row."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "item": [
+        {
+          "name": "SePay Payment Received",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const secret = pm.collectionVariables.get('sepay_webhook_secret');",
+                  "if (!secret) {",
+                  "    console.warn('sepay_webhook_secret is empty — set it to the running server\\'s SEPAY_WEBHOOK_SECRET or this request will 401');",
+                  "}",
+                  "const ts = Math.floor(Date.now() / 1000).toString();",
+                  "const rawBody = pm.request.body.raw;",
+                  "const toSign = ts + '.' + rawBody;",
+                  "const signature = 'sha256=' + CryptoJS.HmacSHA256(toSign, secret || '').toString(CryptoJS.enc.Hex);",
+                  "pm.request.headers.upsert({ key: 'X-SePay-Timestamp', value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-SePay-Signature', value: signature });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/webhooks/sepay",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"id\": 92704662,\n    \"accountNumber\": \"0123456789\",\n    \"code\": \"{{sepay_transfer_prefix}}{{booking_id}}\",\n    \"content\": \"chuyen tien {{sepay_transfer_prefix}}{{booking_id}}\",\n    \"transferAmount\": {{computed_price}},\n    \"transferType\": \"in\"\n}"
+            },
+            "description": "Simulates SePay's callback for the booking created by Public > Create Booking (run that first — this needs booking_id and computed_price). The pre-request script signs the exact raw body with HMAC-SHA256 over \"<unix-timestamp>.<raw body>\" and sends it as X-SePay-Signature/X-SePay-Timestamp, mirroring util/checkout/sepay.go. Editing the body in the Postman UI after this description is fine; the script always signs whatever is currently in the raw editor.\n\nSet sepay_webhook_secret (collection variable) to the server's SEPAY_WEBHOOK_SECRET first, or every request 401s.\n\ntransferAmount must exactly equal computed_price — a mismatch is rejected with PAYMENT_AMOUNT_MISMATCH and the booking stays pending. Re-sending the identical body is idempotent (safe to replay)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Roster",
+      "description": "Superadmin only — the JWT's user id must be superadmin, not just admin.",
+      "item": [
+        {
+          "name": "List Admins",
+          "request": { "method": "GET", "url": "{{base_url}}/api/v1/admin/admins" }
+        },
+        {
+          "name": "Grant Admin",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/admin/admins",
+            "body": { "mode": "raw", "raw": "{\n    \"user_id\": {{target_user_id}}\n}" },
+            "description": "target_user_id is a users.id — that user must have signed in via Google OAuth at least once already, since there is no way to create a user any other way."
+          }
+        },
+        {
+          "name": "Revoke Admin",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/api/v1/admin/admins/{{target_user_id}}",
+            "description": "A user id that matches nothing returns 404, not {\"ok\":true} — this was a fixed defect (silently reporting success while revoking nobody)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Homes",
+      "item": [
+        {
+          "name": "List Homes",
+          "request": { "method": "GET", "url": "{{base_url}}/api/v1/admin/homes" }
+        },
+        {
+          "name": "Create Home",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set('home_id', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/admin/homes",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"name\": \"Home 1 - Da Lat\",\n    \"category\": \"home\",\n    \"address\": \"123 Tran Phu, Da Lat\",\n    \"description\": \"2-bedroom, private garden\"\n}"
+            },
+            "description": "category is one of home/nest. Auto-fills home_id for the other requests in this collection."
+          }
+        },
+        {
+          "name": "Update Home",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/admin/homes/{{home_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"name\": \"Home 1 - Da Lat\",\n    \"category\": \"home\",\n    \"address\": \"123 Tran Phu, Da Lat\",\n    \"description\": \"2-bedroom, private garden, renovated\",\n    \"google_calendar_id\": \"primary\",\n    \"is_active\": true\n}"
+            },
+            "description": "This is a full replace of name/category/address/description. google_calendar_id and is_active are pointers server-side — omit either key entirely (don't send null) to leave it unchanged rather than blanking/deactivating the home."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Pricing Rules",
+      "item": [
+        {
+          "name": "List Pricing Rules",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/pricing-rules?category=home",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "admin", "pricing-rules"],
+              "query": [{ "key": "category", "value": "home" }]
+            },
+            "description": "category is optional; omit it to list every active rule across both tiers."
+          }
+        },
+        {
+          "name": "Create Pricing Rule (Hourly)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set('pricing_rule_id', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/admin/pricing-rules",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"category\": \"home\",\n    \"rule_type\": \"hourly\",\n    \"base_hours\": 3,\n    \"base_price\": 300000,\n    \"extra_hour_price\": 80000\n}"
+            },
+            "description": "hourly rules need base_hours/base_price/extra_hour_price. Duration up to base_hours costs base_price flat; each additional hour (rounded up) adds extra_hour_price."
+          }
+        },
+        {
+          "name": "Create Pricing Rule (Overnight, windowed)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/admin/pricing-rules",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"category\": \"home\",\n    \"rule_type\": \"overnight\",\n    \"flat_price\": 800000,\n    \"window_start\": \"22:00\",\n    \"window_end\": \"06:00\"\n}"
+            },
+            "description": "overnight/day rules need flat_price, charged per 24h unit (ceil, minimum 1). window_start/window_end are optional and apply to start_time only — an overnight booking must start inside the window (here 22:00-06:00, wrapping past midnight); a plain 'day' rule usually omits the window."
+          }
+        },
+        {
+          "name": "Supersede Pricing Rule",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/admin/pricing-rules/{{pricing_rule_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"category\": \"home\",\n    \"rule_type\": \"hourly\",\n    \"base_hours\": 3,\n    \"base_price\": 320000,\n    \"extra_hour_price\": 90000\n}"
+            },
+            "description": "This does not edit the row in place — it deactivates the rule at pricing_rule_id and inserts a new active one, returning the new rule's id. Update pricing_rule_id afterward if you want to supersede again."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Blocked Slots",
+      "item": [
+        {
+          "name": "List Blocked Slots",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/blocked-slots?home_id={{home_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "admin", "blocked-slots"],
+              "query": [{ "key": "home_id", "value": "{{home_id}}" }]
+            }
+          }
+        },
+        {
+          "name": "Create Blocked Slot",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set('blocked_slot_id', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/admin/blocked-slots",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"home_id\": {{home_id}},\n    \"start_time\": \"2026-08-10T00:00:00+07:00\",\n    \"end_time\": \"2026-08-12T00:00:00+07:00\",\n    \"reason\": \"maintenance\"\n}"
+            },
+            "description": "Overlaps the same overlap-exclusion check bookings use, so it will refuse to overlap an existing pending/confirmed booking on this home."
+          }
+        },
+        {
+          "name": "Delete Blocked Slot",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/api/v1/admin/blocked-slots/{{blocked_slot_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Bookings",
+      "item": [
+        {
+          "name": "List Bookings by Home + Date",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/bookings?home_id={{home_id}}&date=2026-08-01",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "admin", "bookings"],
+              "query": [
+                { "key": "home_id", "value": "{{home_id}}" },
+                { "key": "date", "value": "2026-08-01" }
+              ]
+            },
+            "description": "date is YYYY-MM-DD, parsed in the server's APP_TIMEZONE (default Asia/Ho_Chi_Minh) — defaults to today if omitted."
+          }
+        },
+        {
+          "name": "Create Walk-In Booking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    pm.collectionVariables.set('admin_booking_id', pm.response.json().id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/admin/bookings",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"home_id\": {{home_id}},\n    \"customer_name\": \"Khach Vang Lai\",\n    \"customer_phone\": \"0911111111\",\n    \"start_time\": \"2026-08-02T14:00:00+07:00\",\n    \"end_time\": \"2026-08-02T18:00:00+07:00\",\n    \"booking_type\": \"hourly\",\n    \"paid_cash\": true\n}"
+            },
+            "description": "A walk-in is confirmed immediately (no pending_payment step) and never expires. paid_cash:true records a paid cash Payment row alongside it; set it false for a guest paying by some other means you'll reconcile by hand."
+          }
+        },
+        {
+          "name": "Cancel Booking",
+          "request": {
+            "method": "PATCH",
+            "url": "{{base_url}}/api/v1/admin/bookings/{{admin_booking_id}}/cancel",
+            "description": "Refuses completed/no_show/already-cancelled/expired bookings (terminal states — there's no refund concept in this system, so a finished stay can't be un-done)."
+          }
+        },
+        {
+          "name": "Complete Booking",
+          "request": {
+            "method": "PATCH",
+            "url": "{{base_url}}/api/v1/admin/bookings/{{admin_booking_id}}/complete",
+            "description": "Only valid from confirmed, and only once start_time has passed — completing early would free the slot for a stay the record claims already happened."
+          }
+        },
+        {
+          "name": "Mark No-Show",
+          "request": {
+            "method": "PATCH",
+            "url": "{{base_url}}/api/v1/admin/bookings/{{admin_booking_id}}/no-show",
+            "description": "Only valid from confirmed."
+          }
+        },
+        {
+          "name": "Set Door Lock Code",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/api/v1/admin/bookings/{{admin_booking_id}}/lock-code",
+            "body": { "mode": "raw", "raw": "{\n    \"code\": \"4821\"\n}" },
+            "description": "Only valid on a confirmed booking. Does not send anything by itself — call Send Door Lock Code next, or let the check-in cron sweep pick it up."
+          }
+        },
+        {
+          "name": "Send Door Lock Code",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/api/v1/admin/bookings/{{admin_booking_id}}/send-lock-code",
+            "description": "Delivers the code to the guest via Zalo ZNS right now instead of waiting for check-in time. Requires a code already set and the booking still confirmed; sending twice is a no-op (the second call reports {\"ok\":true} without re-sending)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Overview",
+      "item": [
+        {
+          "name": "Revenue Overview",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/admin/overview?from=2026-08-01&to=2026-09-01",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "admin", "overview"],
+              "query": [
+                { "key": "from", "value": "2026-08-01" },
+                { "key": "to", "value": "2026-09-01" }
+              ]
+            },
+            "description": "from/to are YYYY-MM-DD, half-open ([from, to)), parsed in APP_TIMEZONE. Default window is month-to-date if both are omitted.\n\ntotal_revenue_vnd is cash-basis (payments.paid_at in range); booking_count is occupancy-basis (bookings.start_time in range) — the two run on different clocks on purpose and don't divide into an average price. See the comment on presenter.OverviewResponse."
+          }
+        }
+      ]
+    }
+  ]
+}
