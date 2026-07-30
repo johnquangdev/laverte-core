@@ -15,15 +15,13 @@ import (
 )
 
 type fakeBookingRepo struct {
-	rows       map[uint]*model.Booking
-	nextID     uint
-	createErr  error
-	updateErrs map[uint]error
+	rows      map[uint]*model.Booking
+	nextID    uint
+	createErr error
 
-	// Call counters. The lock-code paths deliberately avoid the full-row Update, so
-	// the tests assert on which method ran — without that, a regression back to
-	// Update would leave every value-based assertion still passing.
-	updateCalls  int
+	// Call counters. Several paths here have both a read-time status check and a SQL
+	// guard, and only the counter distinguishes "the guard ran" from "the value
+	// happened to already be right".
 	setCodeCalls int
 	claimCalls   int
 	releaseCalls int
@@ -40,7 +38,7 @@ type fakeBookingRepo struct {
 }
 
 func newFakeBookingRepo() *fakeBookingRepo {
-	return &fakeBookingRepo{rows: map[uint]*model.Booking{}, updateErrs: map[uint]error{}}
+	return &fakeBookingRepo{rows: map[uint]*model.Booking{}}
 }
 
 func (f *fakeBookingRepo) seed(b *model.Booking) *model.Booking {
@@ -76,13 +74,63 @@ func (f *fakeBookingRepo) GetByID(_ context.Context, id uint) (*model.Booking, e
 	return &cp, nil
 }
 
-func (f *fakeBookingRepo) Update(_ context.Context, b *model.Booking) error {
-	if err := f.updateErrs[b.ID]; err != nil {
-		return err
+func (f *fakeBookingRepo) SetPaymentID(_ context.Context, id uint, paymentID uint) error {
+	if b, ok := f.rows[id]; ok {
+		b.PaymentID = &paymentID
 	}
-	f.rows[b.ID] = b
-	f.updateCalls++
 	return nil
+}
+
+func (f *fakeBookingRepo) SetCalendarEventID(_ context.Context, id uint, eventID string) error {
+	if b, ok := f.rows[id]; ok {
+		b.GoogleCalendarEventID = eventID
+	}
+	return nil
+}
+
+// The four guards below mirror their SQL predicates against the stored row rather
+// than the caller's snapshot. That is the whole reason they exist: GetByID above
+// hands out a copy, so a guard that trusted the caller could never be shown to
+// lose a race it should lose.
+func (f *fakeBookingRepo) CancelIfNotTerminal(_ context.Context, id uint) (bool, error) {
+	b, ok := f.rows[id]
+	if !ok {
+		return false, nil
+	}
+	switch b.Status {
+	case model.BookingStatusCancelled, model.BookingStatusExpired,
+		model.BookingStatusCompleted, model.BookingStatusNoShow:
+		return false, nil
+	}
+	b.Status = model.BookingStatusCancelled
+	return true, nil
+}
+
+func (f *fakeBookingRepo) CompleteIfConfirmed(_ context.Context, id uint) (bool, error) {
+	return f.setStatusIfConfirmed(id, model.BookingStatusCompleted)
+}
+
+func (f *fakeBookingRepo) NoShowIfConfirmed(_ context.Context, id uint) (bool, error) {
+	return f.setStatusIfConfirmed(id, model.BookingStatusNoShow)
+}
+
+func (f *fakeBookingRepo) ConfirmIfPending(_ context.Context, id uint, paymentID uint) (bool, error) {
+	b, ok := f.rows[id]
+	if !ok || b.Status != model.BookingStatusPendingPayment {
+		return false, nil
+	}
+	b.Status = model.BookingStatusConfirmed
+	b.PaymentID = &paymentID
+	return true, nil
+}
+
+func (f *fakeBookingRepo) setStatusIfConfirmed(id uint, status string) (bool, error) {
+	b, ok := f.rows[id]
+	if !ok || b.Status != model.BookingStatusConfirmed {
+		return false, nil
+	}
+	b.Status = status
+	return true, nil
 }
 
 func (f *fakeBookingRepo) GetPendingByPhone(context.Context, string) (*model.Booking, error) {
@@ -132,6 +180,10 @@ func (f *fakeBookingRepo) ExpireIfPending(_ context.Context, id uint) (bool, err
 	}
 	b.Status = model.BookingStatusExpired
 	return true, nil
+}
+
+func (f *fakeBookingRepo) ReleaseHoldIfPending(ctx context.Context, id uint) (bool, error) {
+	return f.ExpireIfPending(ctx, id)
 }
 
 // ClaimLockCodeSend mirrors the SQL: stamp only when lock_code_sent_at is still
@@ -429,6 +481,64 @@ func TestCancelDeletesCalendarEvent(t *testing.T) {
 	}
 	if d.calendar.deleteCalls != 1 || d.calendar.deletedEvent != "evt-9" {
 		t.Errorf("DeleteEvent calls = %d, event = %q; want 1, evt-9", d.calendar.deleteCalls, d.calendar.deletedEvent)
+	}
+}
+
+// TestCancelRefusesWhenRowWentTerminalMidRequest is the admin-facing half of the
+// reviewer's second scenario. afterGetByID lands a terminal status on the stored
+// row after Cancel has taken its snapshot, which is what an expiry sweep or a
+// second admin does in the real system. Answering {"ok":true} there would tell
+// the admin a stay is off while it is still on the books — and would delete its
+// Calendar event, removing the only place the discrepancy was visible.
+func TestCancelRefusesWhenRowWentTerminalMidRequest(t *testing.T) {
+	uc, d := newTestUseCase()
+	b := d.bookings.seed(&model.Booking{
+		HomeID: 1, Status: model.BookingStatusConfirmed, GoogleCalendarEventID: "evt-9",
+	})
+	d.bookings.afterGetByID = func(stored *model.Booking) { stored.Status = model.BookingStatusCompleted }
+
+	err := uc.Cancel(context.Background(), b.ID)
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.CodeValidation {
+		t.Fatalf("Cancel() error = %v, want CodeValidation", err)
+	}
+	if stored := d.bookings.rows[b.ID]; stored.Status != model.BookingStatusCompleted {
+		t.Errorf("Status = %q, want %q left standing", stored.Status, model.BookingStatusCompleted)
+	}
+	if d.calendar.deleteCalls != 0 {
+		t.Errorf("DeleteEvent calls = %d, want 0 — nothing was cancelled", d.calendar.deleteCalls)
+	}
+}
+
+// TestCloseOutRefusesWhenBookingLeftConfirmedMidRequest covers Complete and NoShow
+// together: both release the slot (completed and no_show sit outside the overlap
+// exclusion constraint), so winning against a row that is no longer confirmed
+// would put an occupied window back on sale.
+func TestCloseOutRefusesWhenBookingLeftConfirmedMidRequest(t *testing.T) {
+	actions := map[string]func(*UseCase, context.Context, uint) error{
+		"complete": func(uc *UseCase, ctx context.Context, id uint) error { return uc.Complete(ctx, id) },
+		"no-show":  func(uc *UseCase, ctx context.Context, id uint) error { return uc.NoShow(ctx, id) },
+	}
+	for name, action := range actions {
+		t.Run(name, func(t *testing.T) {
+			uc, d := newTestUseCase()
+			b := d.bookings.seed(&model.Booking{
+				HomeID: 1, Status: model.BookingStatusConfirmed,
+				StartTime: time.Now().Add(-time.Hour), EndTime: time.Now().Add(time.Hour),
+			})
+			d.bookings.afterGetByID = func(stored *model.Booking) {
+				stored.Status = model.BookingStatusCancelled
+			}
+
+			err := action(uc, context.Background(), b.ID)
+			e, ok := apperr.As(err)
+			if !ok || e.Code != apperr.CodeValidation {
+				t.Fatalf("error = %v, want CodeValidation", err)
+			}
+			if stored := d.bookings.rows[b.ID]; stored.Status != model.BookingStatusCancelled {
+				t.Errorf("Status = %q, want %q left standing", stored.Status, model.BookingStatusCancelled)
+			}
+		})
 	}
 }
 

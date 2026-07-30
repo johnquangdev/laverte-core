@@ -18,16 +18,20 @@ import (
 )
 
 type fakeBookingRepo struct {
-	booking     *model.Booking
-	updateCalls int
-	getCalls    int
+	booking          *model.Booking
+	confirmCalls     int
+	setCalendarCalls int
+	getCalls         int
 	// getErr, if set, makes every GetByID fail with it instead of the normal
 	// lookup — used to prove a DB outage surfaces as 500, not 404.
 	getErr error
 	// confirmOnGetCall, if non-zero, flips booking.Status to confirmed on the
 	// matching 1-indexed GetByID call, simulating a concurrent delivery's
-	// Update landing between this delivery's first read and its recovery re-read.
+	// settle landing between this delivery's first read and its recovery re-read.
 	confirmOnGetCall int
+	// beforeConfirm runs inside ConfirmIfPending, standing in for an admin cancel or
+	// the expiry sweep landing between this delivery's status check and its write.
+	beforeConfirm func()
 }
 
 func (f *fakeBookingRepo) Create(context.Context, *model.Booking) error { return nil }
@@ -46,10 +50,68 @@ func (f *fakeBookingRepo) GetByID(_ context.Context, id uint) (*model.Booking, e
 	return f.booking, nil
 }
 
-func (f *fakeBookingRepo) Update(_ context.Context, b *model.Booking) error {
-	f.updateCalls++
-	f.booking = b
+// ConfirmIfPending mirrors the guarded UPDATE the settle path depends on. A fake
+// that reported success unconditionally would hide the whole point of the guard:
+// this delivery must lose to whatever moved the booking out of pending_payment
+// while the provider call was in flight.
+func (f *fakeBookingRepo) ConfirmIfPending(_ context.Context, id uint, paymentID uint) (bool, error) {
+	if f.beforeConfirm != nil {
+		f.beforeConfirm()
+	}
+	if f.booking == nil || f.booking.ID != id || f.booking.Status != model.BookingStatusPendingPayment {
+		return false, nil
+	}
+	f.confirmCalls++
+	f.booking.Status = model.BookingStatusConfirmed
+	f.booking.PaymentID = &paymentID
+	return true, nil
+}
+
+func (f *fakeBookingRepo) SetCalendarEventID(_ context.Context, id uint, eventID string) error {
+	f.setCalendarCalls++
+	if f.booking != nil && f.booking.ID == id {
+		f.booking.GoogleCalendarEventID = eventID
+	}
 	return nil
+}
+
+// SetPaymentID and the three admin status guards are not reached from the webhook;
+// the guards still mirror their predicates so a future test cannot pass here while
+// the real query declines.
+func (f *fakeBookingRepo) SetPaymentID(_ context.Context, id uint, paymentID uint) error {
+	if f.booking != nil && f.booking.ID == id {
+		f.booking.PaymentID = &paymentID
+	}
+	return nil
+}
+
+func (f *fakeBookingRepo) CancelIfNotTerminal(_ context.Context, id uint) (bool, error) {
+	if f.booking == nil || f.booking.ID != id {
+		return false, nil
+	}
+	switch f.booking.Status {
+	case model.BookingStatusCancelled, model.BookingStatusExpired,
+		model.BookingStatusCompleted, model.BookingStatusNoShow:
+		return false, nil
+	}
+	f.booking.Status = model.BookingStatusCancelled
+	return true, nil
+}
+
+func (f *fakeBookingRepo) CompleteIfConfirmed(_ context.Context, id uint) (bool, error) {
+	return f.setStatusIfConfirmed(id, model.BookingStatusCompleted)
+}
+
+func (f *fakeBookingRepo) NoShowIfConfirmed(_ context.Context, id uint) (bool, error) {
+	return f.setStatusIfConfirmed(id, model.BookingStatusNoShow)
+}
+
+func (f *fakeBookingRepo) setStatusIfConfirmed(id uint, status string) (bool, error) {
+	if f.booking == nil || f.booking.ID != id || f.booking.Status != model.BookingStatusConfirmed {
+		return false, nil
+	}
+	f.booking.Status = status
+	return true, nil
 }
 
 func (f *fakeBookingRepo) GetPendingByPhone(context.Context, string) (*model.Booking, error) {
@@ -92,6 +154,10 @@ func (f *fakeBookingRepo) ExpireIfPending(_ context.Context, id uint) (bool, err
 	}
 	f.booking.Status = model.BookingStatusExpired
 	return true, nil
+}
+
+func (f *fakeBookingRepo) ReleaseHoldIfPending(ctx context.Context, id uint) (bool, error) {
+	return f.ExpireIfPending(ctx, id)
 }
 
 func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
@@ -265,6 +331,39 @@ func TestHandleSePayWebhookConfirmsBooking(t *testing.T) {
 	if h.bookings.booking.GoogleCalendarEventID != "gcal-evt-1" {
 		t.Errorf("GoogleCalendarEventID = %q, want gcal-evt-1", h.bookings.booking.GoogleCalendarEventID)
 	}
+	// Status and payment_id are written by one statement. A confirmed booking whose
+	// payment link is missing is money SumPaidBetween counts with nothing to
+	// reconcile it against.
+	if h.bookings.booking.PaymentID == nil || *h.bookings.booking.PaymentID != h.payments.payment.ID {
+		t.Errorf("PaymentID = %v, want %d", h.bookings.booking.PaymentID, h.payments.payment.ID)
+	}
+}
+
+// TestHandleSePayWebhookDoesNotResurrectCancelledBooking covers the race the
+// reviewer reproduced: the guest phones to cancel while the transfer is in flight,
+// the admin cancels and the Calendar event is deleted, and then this delivery
+// arrives. Confirming anyway would put the booking back inside the overlap
+// exclusion constraint — re-holding the slot for a stay everyone believes is off,
+// with no Calendar event left to show it.
+func TestHandleSePayWebhookDoesNotResurrectCancelledBooking(t *testing.T) {
+	h := newHarness(pendingBooking(), paidEvent(), nil)
+	h.bookings.beforeConfirm = func() { h.bookings.booking.Status = model.BookingStatusCancelled }
+
+	if err := h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{}); err != nil {
+		t.Fatalf("HandleSePayWebhook() error = %v, want nil (a retry cannot help)", err)
+	}
+	if h.bookings.booking.Status != model.BookingStatusCancelled {
+		t.Errorf("Status = %q, want %q left standing", h.bookings.booking.Status, model.BookingStatusCancelled)
+	}
+	if h.bookings.confirmCalls != 0 {
+		t.Errorf("ConfirmIfPending wins = %d, want 0", h.bookings.confirmCalls)
+	}
+	if h.calendar.createCalls != 0 {
+		t.Errorf("CreateEvent calls = %d, want 0 — the cancelled stay must not get a fresh event", h.calendar.createCalls)
+	}
+	if h.notifier.confirmedCalls != 0 {
+		t.Errorf("BookingConfirmed calls = %d, want 0", h.notifier.confirmedCalls)
+	}
 }
 
 func TestHandleSePayWebhookAcknowledgesPing(t *testing.T) {
@@ -273,8 +372,8 @@ func TestHandleSePayWebhookAcknowledgesPing(t *testing.T) {
 	if err := h.uc.HandleSePayWebhook(context.Background(), []byte(""), http.Header{}); err != nil {
 		t.Fatalf("HandleSePayWebhook() on ping error = %v, want nil", err)
 	}
-	if h.payments.markCalls != 0 || h.bookings.updateCalls != 0 {
-		t.Errorf("ping mutated state: markCalls=%d updateCalls=%d", h.payments.markCalls, h.bookings.updateCalls)
+	if h.payments.markCalls != 0 || h.bookings.confirmCalls != 0 {
+		t.Errorf("ping mutated state: markCalls=%d confirmCalls=%d", h.payments.markCalls, h.bookings.confirmCalls)
 	}
 	if h.bookings.booking.Status != model.BookingStatusPendingPayment {
 		t.Errorf("Status = %q, want unchanged %q", h.bookings.booking.Status, model.BookingStatusPendingPayment)
@@ -338,10 +437,11 @@ func TestHandleSePayWebhookRecoversStrandedSettlement(t *testing.T) {
 	if h.bookings.booking.Status != model.BookingStatusConfirmed {
 		t.Errorf("Status = %q, want confirmed (recovered)", h.bookings.booking.Status)
 	}
-	// One Update to confirm the status, one more from pushCalendarEvent
-	// persisting the calendar event id — both are expected on the happy path.
-	if h.bookings.updateCalls != 2 {
-		t.Errorf("bookingRepo.Update calls = %d, want 2", h.bookings.updateCalls)
+	if h.bookings.confirmCalls != 1 {
+		t.Errorf("ConfirmIfPending calls = %d, want 1", h.bookings.confirmCalls)
+	}
+	if h.bookings.setCalendarCalls != 1 {
+		t.Errorf("SetCalendarEventID calls = %d, want 1 — recovery must still push the event", h.bookings.setCalendarCalls)
 	}
 	if h.notifier.confirmedCalls != 1 {
 		t.Errorf("BookingConfirmed calls = %d, want 1", h.notifier.confirmedCalls)
@@ -368,8 +468,8 @@ func TestHandleSePayWebhookConcurrentRaceLoserIsANoOp(t *testing.T) {
 	if h.bookings.booking.Status != model.BookingStatusConfirmed {
 		t.Errorf("Status = %q, want confirmed (by the winner)", h.bookings.booking.Status)
 	}
-	if h.bookings.updateCalls != 0 {
-		t.Errorf("bookingRepo.Update calls = %d, want 0 — the loser must not touch it again", h.bookings.updateCalls)
+	if h.bookings.confirmCalls != 0 {
+		t.Errorf("ConfirmIfPending calls = %d, want 0 — the loser must not touch it again", h.bookings.confirmCalls)
 	}
 	if h.notifier.confirmedCalls != 0 {
 		t.Errorf("BookingConfirmed calls = %d, want 0 — the loser must not notify again", h.notifier.confirmedCalls)

@@ -39,7 +39,6 @@ func (f *fakeBookingRepo) Create(context.Context, *model.Booking) error { return
 func (f *fakeBookingRepo) GetByID(context.Context, uint) (*model.Booking, error) {
 	return nil, errors.New("booking not found")
 }
-func (f *fakeBookingRepo) Update(context.Context, *model.Booking) error { return nil }
 func (f *fakeBookingRepo) GetPendingByPhone(context.Context, string) (*model.Booking, error) {
 	return nil, errors.New("booking not found")
 }
@@ -61,12 +60,28 @@ func (f *fakeBookingRepo) CountConfirmedBetween(context.Context, time.Time, time
 func (f *fakeBookingRepo) MarkLockCodeAlertSent(context.Context, uint, time.Time) error {
 	return nil
 }
-func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error { return nil }
-func (f *fakeBookingRepo) ExpireIfPending(context.Context, uint) (bool, error) { return true, nil }
+func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error    { return nil }
+func (f *fakeBookingRepo) SetCalendarEventID(context.Context, uint, string) error { return nil }
+func (f *fakeBookingRepo) SetPaymentID(context.Context, uint, uint) error         { return nil }
+func (f *fakeBookingRepo) ReleaseLockCodeSend(context.Context, uint) error        { return nil }
 func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
-	return true, nil
+	return false, nil
 }
-func (f *fakeBookingRepo) ReleaseLockCodeSend(context.Context, uint) error { return nil }
+
+// The revenue overview never writes, so every guarded write below reports that it
+// lost. A fake that claimed a win it did not perform is the shape of bug the
+// counters in the writing packages' fakes exist to catch, and it costs nothing to
+// keep this one honest.
+func (f *fakeBookingRepo) ConfirmIfPending(context.Context, uint, uint) (bool, error) {
+	return false, nil
+}
+func (f *fakeBookingRepo) CancelIfNotTerminal(context.Context, uint) (bool, error) { return false, nil }
+func (f *fakeBookingRepo) CompleteIfConfirmed(context.Context, uint) (bool, error) { return false, nil }
+func (f *fakeBookingRepo) NoShowIfConfirmed(context.Context, uint) (bool, error)   { return false, nil }
+func (f *fakeBookingRepo) ExpireIfPending(context.Context, uint) (bool, error)     { return false, nil }
+func (f *fakeBookingRepo) ReleaseHoldIfPending(context.Context, uint) (bool, error) {
+	return false, nil
+}
 
 func TestSummaryReportsRevenueAndCount(t *testing.T) {
 	uc := New(&fakePaymentRepo{sum: 4500000}, &fakeBookingRepo{count: 12})

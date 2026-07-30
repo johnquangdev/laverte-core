@@ -34,9 +34,8 @@ func TestSetLockCodeStoresCode(t *testing.T) {
 	if b.DoorLockCode == nil || *b.DoorLockCode != "4321" {
 		t.Errorf("DoorLockCode = %v, want 4321", b.DoorLockCode)
 	}
-	if d.bookings.setCodeCalls != 1 || d.bookings.updateCalls != 0 {
-		t.Errorf("setCodeCalls=%d updateCalls=%d, want 1/0: the code must be written as a single column, not through a full-row Save",
-			d.bookings.setCodeCalls, d.bookings.updateCalls)
+	if d.bookings.setCodeCalls != 1 {
+		t.Errorf("setCodeCalls = %d, want 1: the code must be written as its own column", d.bookings.setCodeCalls)
 	}
 }
 
@@ -97,10 +96,10 @@ func TestSendLockCodeSendsOnlyOnce(t *testing.T) {
 	if !b.LockCodeSentAt.Equal(firstSentAt) {
 		t.Errorf("LockCodeSentAt moved %v -> %v; the second call must not re-stamp", firstSentAt, b.LockCodeSentAt)
 	}
-	// One claim, no full-row Save: a door code is a physical-access credential, so the
-	// send must be gated by the DB claim rather than by a read-then-write.
-	if d.bookings.claimCalls != 1 || d.bookings.updateCalls != 0 {
-		t.Errorf("claimCalls=%d updateCalls=%d, want 1/0", d.bookings.claimCalls, d.bookings.updateCalls)
+	// One claim: a door code is a physical-access credential, so the send must be
+	// gated by the DB claim rather than by a read-then-write.
+	if d.bookings.claimCalls != 1 {
+		t.Errorf("claimCalls = %d, want 1", d.bookings.claimCalls)
 	}
 }
 

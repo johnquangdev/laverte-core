@@ -142,7 +142,7 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 	}
 
 	b.PaymentID = &pay.ID
-	if err = uc.bookingRepo.Update(ctx, b); err != nil {
+	if err = uc.bookingRepo.SetPaymentID(ctx, b.ID, pay.ID); err != nil {
 		// The payment row already carries the QR and is reachable via GetByBookingID
 		// independent of this link, so a guest retry recovers through the match path
 		// above rather than needing a release here.
@@ -158,9 +158,16 @@ func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest)
 // an error, and the expiry sweep would collect the row eventually — this only stops the
 // window being unbookable until then.
 func (uc *UseCase) releaseBooking(ctx context.Context, b *model.Booking) {
-	b.Status = model.BookingStatusExpired
-	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+	released, err := uc.bookingRepo.ReleaseHoldIfPending(ctx, b.ID)
+	if err != nil {
 		uc.log.Error("could not release a booking hold after a failed create",
 			zap.Uint("booking_id", b.ID), zap.Error(err))
+		return
 	}
+	// The hold left pending_payment while this request was failing — the transfer
+	// landed and the webhook confirmed it. Its slot is no longer ours to hand back.
+	if !released {
+		return
+	}
+	b.Status = model.BookingStatusExpired
 }

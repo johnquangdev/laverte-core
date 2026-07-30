@@ -133,7 +133,7 @@ func (uc *UseCase) CreateWalkIn(ctx context.Context, req payload.CreateWalkInBoo
 			return nil, apperr.Internal(err)
 		}
 		b.PaymentID = &p.ID
-		if err := uc.bookingRepo.Update(ctx, b); err != nil {
+		if err := uc.bookingRepo.SetPaymentID(ctx, b.ID, p.ID); err != nil {
 			return nil, apperr.Internal(err)
 		}
 	}
@@ -157,9 +157,17 @@ func (uc *UseCase) pushCalendarEvent(ctx context.Context, home *model.Home, b *m
 		return
 	}
 	b.GoogleCalendarEventID = eventID
-	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+	if err := uc.bookingRepo.SetCalendarEventID(ctx, b.ID, eventID); err != nil {
 		uc.log.Error("persist calendar event id failed", zap.Uint("booking_id", b.ID), zap.Error(err))
 	}
+}
+
+// errNotConfirmed is the refusal every close-out action shares. Each checks the
+// status twice — once against the row it read, once in the SQL guard that
+// actually enforces it — and the admin must not be able to tell which one caught
+// it, since both mean the same thing: there is no confirmed stay to close.
+func errNotConfirmed() error {
+	return apperr.Validation("chi booking dang 'confirmed' moi doi duoc trang thai nay")
 }
 
 func (uc *UseCase) Cancel(ctx context.Context, id uint) error {
@@ -178,9 +186,16 @@ func (uc *UseCase) Cancel(ctx context.Context, id uint) error {
 		return apperr.Validation("booking da ket thuc, khong the huy")
 	}
 
-	b.Status = model.BookingStatusCancelled
-	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+	cancelled, err := uc.bookingRepo.CancelIfNotTerminal(ctx, id)
+	if err != nil {
 		return apperr.Internal(err)
+	}
+	// The status check above ran against a row read moments ago; the SQL guard is
+	// what actually enforces it. Losing means a terminal status arrived in between —
+	// the sweep expired the hold, or another admin got there first — and the admin
+	// must be told, or they walk away believing a stay is cancelled when it is not.
+	if !cancelled {
+		return apperr.Validation("booking da huy, het han hoac da ket thuc — khong the huy")
 	}
 
 	uc.deleteCalendarEvent(ctx, b)
@@ -199,37 +214,39 @@ func (uc *UseCase) Complete(ctx context.Context, id uint) error {
 		return apperr.NotFound(err)
 	}
 	if b.Status != model.BookingStatusConfirmed {
-		return apperr.Validation("chi booking dang 'confirmed' moi doi duoc trang thai nay")
+		return errNotConfirmed()
 	}
 	if b.StartTime.After(time.Now()) {
 		return apperr.Validation("booking chua bat dau, khong the hoan thanh")
 	}
 
-	b.Status = model.BookingStatusCompleted
-	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+	completed, err := uc.bookingRepo.CompleteIfConfirmed(ctx, id)
+	if err != nil {
 		return apperr.Internal(err)
+	}
+	if !completed {
+		return errNotConfirmed()
 	}
 	return nil
 }
 
+// NoShow closes out a confirmed stay the guest never arrived for. A booking that
+// was never confirmed has no stay to close out, so the request is a mistake
+// rather than a no-op.
 func (uc *UseCase) NoShow(ctx context.Context, id uint) error {
-	return uc.transitionFromConfirmed(ctx, id, model.BookingStatusNoShow)
-}
-
-// transitionFromConfirmed guards the closing states that don't carry their own
-// extra precondition: a booking that was never confirmed has no stay to close
-// out, so the request is a mistake rather than a no-op.
-func (uc *UseCase) transitionFromConfirmed(ctx context.Context, id uint, status string) error {
 	b, err := uc.bookingRepo.GetByID(ctx, id)
 	if err != nil {
 		return apperr.NotFound(err)
 	}
 	if b.Status != model.BookingStatusConfirmed {
-		return apperr.Validation("chi booking dang 'confirmed' moi doi duoc trang thai nay")
+		return errNotConfirmed()
 	}
-	b.Status = status
-	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+	marked, err := uc.bookingRepo.NoShowIfConfirmed(ctx, id)
+	if err != nil {
 		return apperr.Internal(err)
+	}
+	if !marked {
+		return errNotConfirmed()
 	}
 	return nil
 }

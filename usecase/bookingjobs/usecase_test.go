@@ -15,10 +15,8 @@ import (
 type fakeBookingRepo struct {
 	rows       map[uint]*model.Booking
 	nextID     uint
-	updateErrs map[uint]error
 	expireErrs map[uint]error
 
-	updateCalls  int
 	setCodeCalls int
 	claimCalls   int
 	releaseCalls int
@@ -32,7 +30,6 @@ type fakeBookingRepo struct {
 func newFakeBookingRepo() *fakeBookingRepo {
 	return &fakeBookingRepo{
 		rows:       map[uint]*model.Booking{},
-		updateErrs: map[uint]error{},
 		expireErrs: map[uint]error{},
 	}
 }
@@ -52,14 +49,64 @@ func (f *fakeBookingRepo) GetByID(_ context.Context, id uint) (*model.Booking, e
 	}
 	return b, nil
 }
-func (f *fakeBookingRepo) Update(_ context.Context, b *model.Booking) error {
-	f.updateCalls++
-	if err := f.updateErrs[b.ID]; err != nil {
-		return err
+func (f *fakeBookingRepo) SetPaymentID(_ context.Context, id uint, paymentID uint) error {
+	if b, ok := f.rows[id]; ok {
+		b.PaymentID = &paymentID
 	}
-	f.rows[b.ID] = b
 	return nil
 }
+
+func (f *fakeBookingRepo) SetCalendarEventID(_ context.Context, id uint, eventID string) error {
+	if b, ok := f.rows[id]; ok {
+		b.GoogleCalendarEventID = eventID
+	}
+	return nil
+}
+
+// None of the four guards below is reached from a cron job, but each mirrors its
+// SQL predicate: the sweeps are the other side of every race these guards exist to
+// lose, so a fake that reported a constant win here would be actively misleading.
+func (f *fakeBookingRepo) ConfirmIfPending(_ context.Context, id uint, paymentID uint) (bool, error) {
+	b, ok := f.rows[id]
+	if !ok || b.Status != model.BookingStatusPendingPayment {
+		return false, nil
+	}
+	b.Status = model.BookingStatusConfirmed
+	b.PaymentID = &paymentID
+	return true, nil
+}
+
+func (f *fakeBookingRepo) CancelIfNotTerminal(_ context.Context, id uint) (bool, error) {
+	b, ok := f.rows[id]
+	if !ok {
+		return false, nil
+	}
+	switch b.Status {
+	case model.BookingStatusCancelled, model.BookingStatusExpired,
+		model.BookingStatusCompleted, model.BookingStatusNoShow:
+		return false, nil
+	}
+	b.Status = model.BookingStatusCancelled
+	return true, nil
+}
+
+func (f *fakeBookingRepo) CompleteIfConfirmed(_ context.Context, id uint) (bool, error) {
+	return f.setStatusIfConfirmed(id, model.BookingStatusCompleted)
+}
+
+func (f *fakeBookingRepo) NoShowIfConfirmed(_ context.Context, id uint) (bool, error) {
+	return f.setStatusIfConfirmed(id, model.BookingStatusNoShow)
+}
+
+func (f *fakeBookingRepo) setStatusIfConfirmed(id uint, status string) (bool, error) {
+	b, ok := f.rows[id]
+	if !ok || b.Status != model.BookingStatusConfirmed {
+		return false, nil
+	}
+	b.Status = status
+	return true, nil
+}
+
 func (f *fakeBookingRepo) GetPendingByPhone(context.Context, string) (*model.Booking, error) {
 	return nil, errors.New("booking not found")
 }
@@ -152,6 +199,10 @@ func (f *fakeBookingRepo) ExpireIfPending(_ context.Context, id uint) (bool, err
 	return true, nil
 }
 
+func (f *fakeBookingRepo) ReleaseHoldIfPending(ctx context.Context, id uint) (bool, error) {
+	return f.ExpireIfPending(ctx, id)
+}
+
 // ClaimLockCodeSend mirrors the SQL: stamp only when lock_code_sent_at is still
 // NULL, and report whether this caller won the claim.
 func (f *fakeBookingRepo) ClaimLockCodeSend(_ context.Context, id uint, at time.Time) (bool, error) {
@@ -175,6 +226,13 @@ func (f *fakeBookingRepo) ReleaseLockCodeSend(_ context.Context, id uint) error 
 type fakePaymentRepo struct {
 	rows   map[uint]*model.Payment
 	nextID uint
+	// The sweep's contract is that losing the booking write stops it touching the
+	// money side at all. Neither the payment's final status nor markExpiredCalls can
+	// show that on its own: expirePaymentOf bails out for an already-paid payment
+	// before it writes, so both look identical whether the guard held or the sweep
+	// walked in and found nothing to do. Counting the lookup is what separates them.
+	getByBookingIDCalls int
+	markExpiredCalls    int
 }
 
 func newFakePaymentRepo() *fakePaymentRepo {
@@ -197,6 +255,7 @@ func (f *fakePaymentRepo) GetByID(_ context.Context, id uint) (*model.Payment, e
 	return p, nil
 }
 func (f *fakePaymentRepo) GetByBookingID(_ context.Context, bookingID uint) (*model.Payment, error) {
+	f.getByBookingIDCalls++
 	for _, p := range f.rows {
 		if p.BookingID == bookingID {
 			return p, nil
@@ -211,6 +270,7 @@ func (f *fakePaymentRepo) SumPaidBetween(context.Context, time.Time, time.Time) 
 	return 0, nil
 }
 func (f *fakePaymentRepo) MarkExpiredIfPending(_ context.Context, paymentID uint) error {
+	f.markExpiredCalls++
 	p, ok := f.rows[paymentID]
 	if !ok {
 		return errors.New("payment not found")
@@ -294,10 +354,6 @@ func TestExpirePendingBookingsContinuesAfterRowFailure(t *testing.T) {
 	if good.Status != model.BookingStatusExpired {
 		t.Errorf("second booking Status = %q, want %q — a failed row must not abort the sweep", good.Status, model.BookingStatusExpired)
 	}
-	if bookings.updateCalls != 0 {
-		t.Errorf("updateCalls = %d, want 0: expiry must go through the guarded transition, not a full-row Save",
-			bookings.updateCalls)
-	}
 }
 
 // The sweep lists a batch, then writes each row a moment later. A booking the SePay
@@ -309,6 +365,7 @@ func TestExpirePendingBookingsLeavesBookingConfirmedMidSweepAlone(t *testing.T) 
 	b := bookings.seed(&model.Booking{HomeID: 1, Status: model.BookingStatusPendingPayment, ExpiresAt: &past})
 	paidAt := time.Now()
 	p := payments.seed(&model.Payment{BookingID: b.ID, Provider: model.PaymentProviderSePay, Status: model.PaymentStatusPending, Amount: 300000})
+	b.PaymentID = &p.ID
 
 	// Stand in for the webhook landing between the list query and this row's write.
 	bookings.beforeExpire = func() {
@@ -326,6 +383,10 @@ func TestExpirePendingBookingsLeavesBookingConfirmedMidSweepAlone(t *testing.T) 
 	}
 	if p.Status != model.PaymentStatusPaid {
 		t.Errorf("payment Status = %q, want %q", p.Status, model.PaymentStatusPaid)
+	}
+	if payments.getByBookingIDCalls != 0 || payments.markExpiredCalls != 0 {
+		t.Errorf("payment side reached: GetByBookingID=%d MarkExpiredIfPending=%d, want 0/0 — a declined booking write must stop the sweep before the money",
+			payments.getByBookingIDCalls, payments.markExpiredCalls)
 	}
 }
 
@@ -393,9 +454,8 @@ func TestSendDueLockCodesSendsAndMarks(t *testing.T) {
 	if noCode.LockCodeSentAt != nil {
 		t.Error("LockCodeSentAt set for a booking with no code, want nil")
 	}
-	if bookings.claimCalls != 1 || bookings.updateCalls != 0 {
-		t.Errorf("claimCalls=%d updateCalls=%d, want 1/0: the send must be gated by the DB claim, not by a full-row Save",
-			bookings.claimCalls, bookings.updateCalls)
+	if bookings.claimCalls != 1 {
+		t.Errorf("claimCalls = %d, want 1: the send must be gated by the DB claim", bookings.claimCalls)
 	}
 	// A second claim on the same row must still lose: this is the only thing that
 	// stops a concurrent admin "send now" click and this sweep from both delivering

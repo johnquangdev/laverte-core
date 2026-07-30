@@ -105,8 +105,8 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 		booking = fresh
 	}
 
-	booking.Status = model.BookingStatusConfirmed
-	if err := uc.bookingRepo.Update(ctx, booking); err != nil {
+	confirmed, err := uc.bookingRepo.ConfirmIfPending(ctx, booking.ID, payment.ID)
+	if err != nil {
 		// The money is already settled, so this must be findable by hand: handleErr
 		// logs only the message, with no identifiers.
 		uc.log.Error("payment settled but the booking could not be confirmed",
@@ -116,6 +116,21 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 			zap.Error(err))
 		return apperr.Internal(err)
 	}
+	if !confirmed {
+		// Something moved the booking out of pending_payment between the status check
+		// above and this write. A concurrent delivery that confirmed it has already run
+		// the side effects; an admin cancel or the expiry sweep leaves settled money
+		// against a stay that will not happen, which only a human can reconcile.
+		// Either way a retry cannot help — the payment is already paid, so every
+		// redelivery lands in exactly this branch — so the provider gets a 200.
+		uc.log.Warn("settled payment found its booking no longer pending",
+			zap.Uint("booking_id", booking.ID),
+			zap.Uint("payment_id", payment.ID),
+			zap.String("external_ref", event.ExternalRef))
+		return nil
+	}
+	booking.Status = model.BookingStatusConfirmed
+	booking.PaymentID = &payment.ID
 
 	// Everything below is best-effort: the money has moved and the booking is
 	// confirmed, so a side-effect failure must not make the provider retry a
@@ -148,7 +163,7 @@ func (uc *UseCase) pushCalendarEvent(ctx context.Context, b *model.Booking) {
 	}
 
 	b.GoogleCalendarEventID = eventID
-	if err := uc.bookingRepo.Update(ctx, b); err != nil {
+	if err := uc.bookingRepo.SetCalendarEventID(ctx, b.ID, eventID); err != nil {
 		uc.log.Error("webhook: persist calendar event id failed",
 			zap.Uint("booking_id", b.ID), zap.String("event_id", eventID), zap.Error(err))
 	}

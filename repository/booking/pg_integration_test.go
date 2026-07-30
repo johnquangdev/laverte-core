@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -432,6 +433,352 @@ func TestExpireIfPendingOnlyMovesPendingRows(t *testing.T) {
 	}
 	if expired {
 		t.Fatal("ExpireIfPending() expired = true for a confirmed booking, want false")
+	}
+	got, err = repo.GetByID(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusConfirmed {
+		t.Errorf("Status = %q, want %q left untouched", got.Status, model.BookingStatusConfirmed)
+	}
+}
+
+// seedPendingBooking inserts a hold with an expiry the pending CHECK requires —
+// the starting state for every confirm/release guard below. startIn selects the
+// slot: two rows a test keeps inside the guarded statuses at the same time need
+// different windows, or the exclusion constraint rejects the second insert.
+func seedPendingBooking(t *testing.T, db *gorm.DB, homeID uint, phone string, startIn time.Duration) *model.Booking {
+	t.Helper()
+	start := time.Now().Add(startIn).Truncate(time.Second)
+	b := &model.Booking{
+		HomeID: homeID, CustomerName: "A", CustomerPhone: phone,
+		StartTime: start, EndTime: start.Add(time.Hour), BookingType: model.BookingTypeHourly,
+		ComputedPrice: 100000, Status: model.BookingStatusPendingPayment, ExpiresAt: expiresIn(time.Hour),
+	}
+	if err := db.Create(b).Error; err != nil {
+		t.Fatalf("seed pending booking: %v", err)
+	}
+	return b
+}
+
+// setStatus moves a seeded row directly, standing in for whatever concurrent
+// writer the guard under test has to lose to.
+func setStatus(t *testing.T, db *gorm.DB, id uint, status string) {
+	t.Helper()
+	if err := db.Model(&model.Booking{}).Where("id = ?", id).Update("status", status).Error; err != nil {
+		t.Fatalf("set status %s: %v", status, err)
+	}
+}
+
+// TestSetCalendarEventIDChangesOnlyThatColumn covers the write that reproduced a
+// cancelled booking coming back to life: the event id is persisted after a
+// multi-second Calendar call, so an admin can cancel inside that window. Writing
+// the one column leaves their cancellation standing; a full-row write from the
+// pre-call snapshot would restore 'confirmed', and confirmed re-holds the slot.
+func TestSetCalendarEventIDChangesOnlyThatColumn(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Calendar Event Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	b := seedConfirmedBooking(t, db, home.ID, "0900000030")
+	setStatus(t, db, b.ID, model.BookingStatusCancelled)
+
+	if err := repo.SetCalendarEventID(ctx, b.ID, "gcal-evt-9"); err != nil {
+		t.Fatalf("SetCalendarEventID() error = %v", err)
+	}
+
+	got, err := repo.GetByID(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.GoogleCalendarEventID != "gcal-evt-9" {
+		t.Errorf("GoogleCalendarEventID = %q, want gcal-evt-9", got.GoogleCalendarEventID)
+	}
+	if got.Status != model.BookingStatusCancelled {
+		t.Errorf("Status = %q, want %q — the concurrent cancel must survive", got.Status, model.BookingStatusCancelled)
+	}
+}
+
+// TestSetPaymentIDChangesOnlyThatColumn is the same proof for the payment link:
+// the walk-in and guest create paths both write it after inserting the payment
+// row, by which time another writer may have moved the status.
+func TestSetPaymentIDChangesOnlyThatColumn(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Payment Link Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+	b := seedPendingBooking(t, db, home.ID, "0900000031", time.Hour)
+	setStatus(t, db, b.ID, model.BookingStatusConfirmed)
+
+	if err := repo.SetPaymentID(ctx, b.ID, 55); err != nil {
+		t.Fatalf("SetPaymentID() error = %v", err)
+	}
+
+	got, err := repo.GetByID(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.PaymentID == nil || *got.PaymentID != 55 {
+		t.Errorf("PaymentID = %v, want 55", got.PaymentID)
+	}
+	if got.Status != model.BookingStatusConfirmed {
+		t.Errorf("Status = %q, want %q left untouched", got.Status, model.BookingStatusConfirmed)
+	}
+}
+
+// TestConfirmIfPendingWritesStatusAndPaymentTogether pins both halves of the
+// webhook's settle write. Met: status and payment_id move in one statement, so
+// there is never a confirmed booking with no payment link. Unmet: a hold the
+// admin cancelled while the transfer was in flight must not be resurrected —
+// 'confirmed' is inside the exclusion constraint, so it would re-hold the slot.
+func TestConfirmIfPendingWritesStatusAndPaymentTogether(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Confirm Test Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+
+	pending := seedPendingBooking(t, db, home.ID, "0900000032", time.Hour)
+	confirmed, err := repo.ConfirmIfPending(ctx, pending.ID, 91)
+	if err != nil {
+		t.Fatalf("ConfirmIfPending() error = %v", err)
+	}
+	if !confirmed {
+		t.Fatal("ConfirmIfPending() = false for a pending row, want true")
+	}
+	got, err := repo.GetByID(ctx, pending.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusConfirmed {
+		t.Errorf("Status = %q, want %q", got.Status, model.BookingStatusConfirmed)
+	}
+	if got.PaymentID == nil || *got.PaymentID != 91 {
+		t.Errorf("PaymentID = %v, want 91", got.PaymentID)
+	}
+
+	cancelled := seedPendingBooking(t, db, home.ID, "0900000033", 5*time.Hour)
+	setStatus(t, db, cancelled.ID, model.BookingStatusCancelled)
+	confirmed, err = repo.ConfirmIfPending(ctx, cancelled.ID, 92)
+	if err != nil {
+		t.Fatalf("ConfirmIfPending() on a cancelled row error = %v", err)
+	}
+	if confirmed {
+		t.Fatal("ConfirmIfPending() = true for a cancelled booking, want false")
+	}
+	got, err = repo.GetByID(ctx, cancelled.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusCancelled {
+		t.Errorf("Status = %q, want %q left untouched", got.Status, model.BookingStatusCancelled)
+	}
+	if got.PaymentID != nil {
+		t.Errorf("PaymentID = %v, want nil — a declined confirm must write nothing", got.PaymentID)
+	}
+}
+
+// TestCancelIfNotTerminalDeclinesEveryTerminalStatus pins the other proven
+// failure: a cancel that lands in the instant a hold's transfer settles must not
+// win. Writing status='cancelled' over a paid booking puts the slot back on sale
+// while payment.paid_at and the SePay ref stay stamped and irreversible — the
+// guest paid, has no room, and nothing links their money to any booking.
+func TestCancelIfNotTerminalDeclinesEveryTerminalStatus(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Cancel Guard Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+
+	confirmed := seedConfirmedBooking(t, db, home.ID, "0900000034")
+	cancelled, err := repo.CancelIfNotTerminal(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("CancelIfNotTerminal() error = %v", err)
+	}
+	if !cancelled {
+		t.Fatal("CancelIfNotTerminal() = false for a confirmed row, want true")
+	}
+	got, err := repo.GetByID(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusCancelled {
+		t.Errorf("Status = %q, want %q", got.Status, model.BookingStatusCancelled)
+	}
+
+	phone := 40
+	for _, terminal := range []string{
+		model.BookingStatusCancelled, model.BookingStatusExpired,
+		model.BookingStatusCompleted, model.BookingStatusNoShow,
+	} {
+		phone++
+		b := seedConfirmedBooking(t, db, home.ID, fmt.Sprintf("09000000%d", phone))
+		setStatus(t, db, b.ID, terminal)
+
+		cancelled, err = repo.CancelIfNotTerminal(ctx, b.ID)
+		if err != nil {
+			t.Fatalf("CancelIfNotTerminal() on %s error = %v", terminal, err)
+		}
+		if cancelled {
+			t.Errorf("CancelIfNotTerminal() = true for %s, want false", terminal)
+		}
+		got, err = repo.GetByID(ctx, b.ID)
+		if err != nil {
+			t.Fatalf("GetByID() error = %v", err)
+		}
+		if got.Status != terminal {
+			t.Errorf("Status = %q, want %q left untouched", got.Status, terminal)
+		}
+	}
+}
+
+// TestCompleteIfConfirmedOnlyMovesConfirmedRows and its no-show twin below guard
+// a release rather than a hold: both statuses sit outside the exclusion
+// constraint, so winning against a booking that is no longer confirmed would
+// free a slot that is still occupied.
+func TestCompleteIfConfirmedOnlyMovesConfirmedRows(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Complete Guard Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+
+	confirmed := seedConfirmedBooking(t, db, home.ID, "0900000050")
+	completed, err := repo.CompleteIfConfirmed(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("CompleteIfConfirmed() error = %v", err)
+	}
+	if !completed {
+		t.Fatal("CompleteIfConfirmed() = false for a confirmed row, want true")
+	}
+	got, err := repo.GetByID(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusCompleted {
+		t.Errorf("Status = %q, want %q", got.Status, model.BookingStatusCompleted)
+	}
+
+	pending := seedPendingBooking(t, db, home.ID, "0900000051", 5*time.Hour)
+	completed, err = repo.CompleteIfConfirmed(ctx, pending.ID)
+	if err != nil {
+		t.Fatalf("CompleteIfConfirmed() on a pending row error = %v", err)
+	}
+	if completed {
+		t.Fatal("CompleteIfConfirmed() = true for a pending booking, want false")
+	}
+	got, err = repo.GetByID(ctx, pending.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusPendingPayment {
+		t.Errorf("Status = %q, want %q left untouched", got.Status, model.BookingStatusPendingPayment)
+	}
+}
+
+func TestNoShowIfConfirmedOnlyMovesConfirmedRows(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "NoShow Guard Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+
+	confirmed := seedConfirmedBooking(t, db, home.ID, "0900000052")
+	marked, err := repo.NoShowIfConfirmed(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("NoShowIfConfirmed() error = %v", err)
+	}
+	if !marked {
+		t.Fatal("NoShowIfConfirmed() = false for a confirmed row, want true")
+	}
+	got, err := repo.GetByID(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusNoShow {
+		t.Errorf("Status = %q, want %q", got.Status, model.BookingStatusNoShow)
+	}
+
+	pending := seedPendingBooking(t, db, home.ID, "0900000053", 5*time.Hour)
+	marked, err = repo.NoShowIfConfirmed(ctx, pending.ID)
+	if err != nil {
+		t.Fatalf("NoShowIfConfirmed() on a pending row error = %v", err)
+	}
+	if marked {
+		t.Fatal("NoShowIfConfirmed() = true for a pending booking, want false")
+	}
+	got, err = repo.GetByID(ctx, pending.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusPendingPayment {
+		t.Errorf("Status = %q, want %q left untouched", got.Status, model.BookingStatusPendingPayment)
+	}
+}
+
+// TestReleaseHoldIfPendingOnlyMovesPendingRows covers the unwind of a create
+// that failed after its booking row committed. Losing the guard here would let a
+// provider timeout expire a booking the transfer had meanwhile paid for.
+func TestReleaseHoldIfPendingOnlyMovesPendingRows(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Release Hold Home", Category: model.HomeCategoryHome, IsActive: true}
+	if err := db.Create(home).Error; err != nil {
+		t.Fatalf("create home: %v", err)
+	}
+
+	pending := seedPendingBooking(t, db, home.ID, "0900000054", time.Hour)
+	released, err := repo.ReleaseHoldIfPending(ctx, pending.ID)
+	if err != nil {
+		t.Fatalf("ReleaseHoldIfPending() error = %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseHoldIfPending() = false for a pending row, want true")
+	}
+	got, err := repo.GetByID(ctx, pending.ID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+	if got.Status != model.BookingStatusExpired {
+		t.Errorf("Status = %q, want %q", got.Status, model.BookingStatusExpired)
+	}
+
+	confirmed := seedConfirmedBooking(t, db, home.ID, "0900000055")
+	released, err = repo.ReleaseHoldIfPending(ctx, confirmed.ID)
+	if err != nil {
+		t.Fatalf("ReleaseHoldIfPending() on a confirmed row error = %v", err)
+	}
+	if released {
+		t.Fatal("ReleaseHoldIfPending() = true for a confirmed booking, want false")
 	}
 	got, err = repo.GetByID(ctx, confirmed.ID)
 	if err != nil {

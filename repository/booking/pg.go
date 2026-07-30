@@ -39,18 +39,6 @@ func (r *pgRepository) GetByID(ctx context.Context, id uint) (*model.Booking, er
 	return &b, err
 }
 
-func (r *pgRepository) Update(ctx context.Context, b *model.Booking) error {
-	err := r.getDB(ctx).Save(b).Error
-	if err == nil {
-		return nil
-	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == postgresExclusionViolation {
-		return ErrSlotConflict
-	}
-	return err
-}
-
 func (r *pgRepository) GetPendingByPhone(ctx context.Context, phone string) (*model.Booking, error) {
 	var b model.Booking
 	err := r.getDB(ctx).
@@ -105,7 +93,81 @@ func (r *pgRepository) SetDoorLockCode(ctx context.Context, id uint, code string
 		Update("door_lock_code", code).Error
 }
 
+func (r *pgRepository) SetCalendarEventID(ctx context.Context, id uint, eventID string) error {
+	return r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ?", id).
+		Update("google_calendar_event_id", eventID).Error
+}
+
+func (r *pgRepository) SetPaymentID(ctx context.Context, id uint, paymentID uint) error {
+	return r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ?", id).
+		Update("payment_id", paymentID).Error
+}
+
+func (r *pgRepository) ConfirmIfPending(ctx context.Context, id uint, paymentID uint) (bool, error) {
+	res := r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ? AND status = ?", id, model.BookingStatusPendingPayment).
+		Updates(map[string]any{
+			"status":     model.BookingStatusConfirmed,
+			"payment_id": paymentID,
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// terminalStatuses are the statuses no admin action can move a booking out of.
+// Cancelling one of them would leave the payment behind it counted as revenue by
+// SumPaidBetween while the booking claims the stay never happened, and this
+// system has no refund concept to reconcile that from.
+var terminalStatuses = []string{
+	model.BookingStatusCancelled,
+	model.BookingStatusExpired,
+	model.BookingStatusCompleted,
+	model.BookingStatusNoShow,
+}
+
+func (r *pgRepository) CancelIfNotTerminal(ctx context.Context, id uint) (bool, error) {
+	res := r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ? AND status NOT IN ?", id, terminalStatuses).
+		Update("status", model.BookingStatusCancelled)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+func (r *pgRepository) CompleteIfConfirmed(ctx context.Context, id uint) (bool, error) {
+	res := r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ? AND status = ?", id, model.BookingStatusConfirmed).
+		Update("status", model.BookingStatusCompleted)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+func (r *pgRepository) NoShowIfConfirmed(ctx context.Context, id uint) (bool, error) {
+	res := r.getDB(ctx).Model(&model.Booking{}).
+		Where("id = ? AND status = ?", id, model.BookingStatusConfirmed).
+		Update("status", model.BookingStatusNoShow)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
 func (r *pgRepository) ExpireIfPending(ctx context.Context, id uint) (bool, error) {
+	return r.expirePending(ctx, id)
+}
+
+func (r *pgRepository) ReleaseHoldIfPending(ctx context.Context, id uint) (bool, error) {
+	return r.expirePending(ctx, id)
+}
+
+func (r *pgRepository) expirePending(ctx context.Context, id uint) (bool, error) {
 	res := r.getDB(ctx).Model(&model.Booking{}).
 		Where("id = ? AND status = ?", id, model.BookingStatusPendingPayment).
 		Update("status", model.BookingStatusExpired)

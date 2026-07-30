@@ -21,12 +21,23 @@ import (
 )
 
 type fakeBookingRepo struct {
-	pending     *model.Booking
-	createErr   error
-	created     []*model.Booking
-	updateCalls int
-	nextID      uint
-	byID        map[uint]*model.Booking
+	pending           *model.Booking
+	createErr         error
+	created           []*model.Booking
+	setPaymentIDCalls int
+	nextID            uint
+	byID              map[uint]*model.Booking
+}
+
+// setPending registers the hold in byID as well, so the guarded writes below see
+// it the way the real repository would — a pending row reachable by id, not just
+// by phone. Without that, releasing an orphan would silently find no row.
+func (f *fakeBookingRepo) setPending(b *model.Booking) {
+	f.pending = b
+	if f.byID == nil {
+		f.byID = map[uint]*model.Booking{}
+	}
+	f.byID[b.ID] = b
 }
 
 func (f *fakeBookingRepo) Create(_ context.Context, b *model.Booking) error {
@@ -52,9 +63,63 @@ func (f *fakeBookingRepo) GetByID(_ context.Context, id uint) (*model.Booking, e
 	return nil, gorm.ErrRecordNotFound
 }
 
-func (f *fakeBookingRepo) Update(_ context.Context, _ *model.Booking) error {
-	f.updateCalls++
+func (f *fakeBookingRepo) SetPaymentID(_ context.Context, id uint, paymentID uint) error {
+	f.setPaymentIDCalls++
+	if b, ok := f.byID[id]; ok {
+		b.PaymentID = &paymentID
+	}
 	return nil
+}
+
+func (f *fakeBookingRepo) SetCalendarEventID(_ context.Context, id uint, eventID string) error {
+	if b, ok := f.byID[id]; ok {
+		b.GoogleCalendarEventID = eventID
+	}
+	return nil
+}
+
+// The status guards below are never reached from booking creation, but they mirror
+// their predicates anyway: reporting a win they did not perform is exactly the
+// defect the guards were introduced to remove.
+func (f *fakeBookingRepo) ConfirmIfPending(_ context.Context, id uint, paymentID uint) (bool, error) {
+	b, ok := f.byID[id]
+	if !ok || b.Status != model.BookingStatusPendingPayment {
+		return false, nil
+	}
+	b.Status = model.BookingStatusConfirmed
+	b.PaymentID = &paymentID
+	return true, nil
+}
+
+func (f *fakeBookingRepo) CancelIfNotTerminal(_ context.Context, id uint) (bool, error) {
+	b, ok := f.byID[id]
+	if !ok {
+		return false, nil
+	}
+	switch b.Status {
+	case model.BookingStatusCancelled, model.BookingStatusExpired,
+		model.BookingStatusCompleted, model.BookingStatusNoShow:
+		return false, nil
+	}
+	b.Status = model.BookingStatusCancelled
+	return true, nil
+}
+
+func (f *fakeBookingRepo) CompleteIfConfirmed(_ context.Context, id uint) (bool, error) {
+	return f.setStatusIfConfirmed(id, model.BookingStatusCompleted)
+}
+
+func (f *fakeBookingRepo) NoShowIfConfirmed(_ context.Context, id uint) (bool, error) {
+	return f.setStatusIfConfirmed(id, model.BookingStatusNoShow)
+}
+
+func (f *fakeBookingRepo) setStatusIfConfirmed(id uint, status string) (bool, error) {
+	b, ok := f.byID[id]
+	if !ok || b.Status != model.BookingStatusConfirmed {
+		return false, nil
+	}
+	b.Status = status
+	return true, nil
 }
 
 func (f *fakeBookingRepo) GetPendingByPhone(_ context.Context, phone string) (*model.Booking, error) {
@@ -97,16 +162,20 @@ func (f *fakeBookingRepo) MarkLockCodeAlertSent(_ context.Context, id uint, at t
 // only; this package's tests exercise booking creation, not the lock-code flow.
 func (f *fakeBookingRepo) SetDoorLockCode(context.Context, uint, string) error { return nil }
 
-// ExpireIfPending mirrors the guarded UPDATE: creation releases an orphan hold through
-// this path, so a fake that always claimed the row would hide a release that ran
-// against a booking already confirmed.
-func (f *fakeBookingRepo) ExpireIfPending(_ context.Context, id uint) (bool, error) {
+// ReleaseHoldIfPending mirrors the guarded UPDATE: creation releases an orphan hold
+// through this path, so a fake that always claimed the row would hide a release that
+// ran against a booking the webhook had already confirmed.
+func (f *fakeBookingRepo) ReleaseHoldIfPending(_ context.Context, id uint) (bool, error) {
 	b, ok := f.byID[id]
 	if !ok || b.Status != model.BookingStatusPendingPayment {
 		return false, nil
 	}
 	b.Status = model.BookingStatusExpired
 	return true, nil
+}
+
+func (f *fakeBookingRepo) ExpireIfPending(ctx context.Context, id uint) (bool, error) {
+	return f.ReleaseHoldIfPending(ctx, id)
 }
 
 func (f *fakeBookingRepo) ClaimLockCodeSend(context.Context, uint, time.Time) (bool, error) {
@@ -271,8 +340,8 @@ func TestCreateHappyPathReturnsPendingPaymentWithQR(t *testing.T) {
 	if pay.Status != model.PaymentStatusPending || pay.Amount != 300000 {
 		t.Errorf("payment = %+v, want pending/300000", pay)
 	}
-	if h.bookings.updateCalls != 1 {
-		t.Errorf("bookingRepo.Update calls = %d, want 1 (link payment_id)", h.bookings.updateCalls)
+	if h.bookings.setPaymentIDCalls != 1 {
+		t.Errorf("bookingRepo.SetPaymentID calls = %d, want 1 (link payment_id)", h.bookings.setPaymentIDCalls)
 	}
 }
 
@@ -282,12 +351,12 @@ func TestCreateReturnsExistingPendingBookingForSamePhone(t *testing.T) {
 	expires := time.Now().Add(10 * time.Minute)
 	// HomeID/StartTime/EndTime match req exactly: this is the legitimate case, a
 	// guest retrying the same request and re-reading their own QR.
-	h.bookings.pending = &model.Booking{
+	h.bookings.setPending(&model.Booking{
 		ID: 42, HomeID: req.HomeID, CustomerName: "Khach A", CustomerPhone: "84900000001",
 		StartTime: req.StartTime, EndTime: req.EndTime,
 		BookingType: model.BookingTypeHourly, ComputedPrice: 300000,
 		Status: model.BookingStatusPendingPayment, ExpiresAt: &expires,
-	}
+	})
 	h.payments.byBookingID[42] = &model.Payment{
 		ID: 7, BookingID: 42, Provider: model.PaymentProviderSePay, Amount: 300000,
 		Status: model.PaymentStatusPending, QRContent: "QR-EXISTING",
@@ -338,7 +407,7 @@ func TestCreateRejectsMismatchedPendingHoldWithoutDisclosure(t *testing.T) {
 				Status: model.BookingStatusPendingPayment,
 			}
 			mutate(pending)
-			h.bookings.pending = pending
+			h.bookings.setPending(pending)
 			// A live, payable QR on the stranger's hold: if the home/window match check
 			// were ever removed, this is exactly what would leak to the caller.
 			h.payments.byBookingID[999] = &model.Payment{
@@ -379,7 +448,7 @@ func TestCreateReleasesOrphanHoldAndCreatesFreshBooking(t *testing.T) {
 		BookingType: model.BookingTypeHourly, ComputedPrice: 300000,
 		Status: model.BookingStatusPendingPayment, ExpiresAt: &expires,
 	}
-	h.bookings.pending = orphan
+	h.bookings.setPending(orphan)
 	// No entry in h.payments.byBookingID[7]: GetByBookingID returns gorm.ErrRecordNotFound.
 
 	resp, err := h.uc.Create(context.Background(), req)
