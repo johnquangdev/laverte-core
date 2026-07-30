@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	migrate "github.com/rubenv/sql-migrate"
@@ -45,6 +46,14 @@ func main() {
 
 	log, _ := zap.NewProduction()
 	defer func() { _ = log.Sync() }()
+
+	// Resolved once, before anything serves traffic: an unparseable zone name would
+	// otherwise surface as a wrong 24-hour window on an admin's first ?date= query,
+	// with nothing to indicate the dates were read in the wrong clock.
+	appLocation, err := time.LoadLocation(cfg.AppTimeZone)
+	if err != nil {
+		log.Fatal("invalid APP_TIMEZONE", zap.String("value", cfg.AppTimeZone), zap.Error(err))
+	}
 
 	if err := runMigrations(cfg, log); err != nil {
 		log.Fatal("auto-migration failed", zap.Error(err))
@@ -109,6 +118,7 @@ func main() {
 		BookingAdminUC:    bookingAdminUC,
 		BillingUC:         billingUC,
 		OverviewUC:        overviewUC,
+		Location:          appLocation,
 	})
 
 	bookingJobsUC := bookingjobsuc.New(bookings, payments, notifier, log, *cfg)

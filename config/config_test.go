@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestGetConfigDefaults(t *testing.T) {
 	t.Setenv("JWT_ACCESS_SECRET", "test-access-secret")
@@ -17,6 +20,14 @@ func TestGetConfigDefaults(t *testing.T) {
 	}
 	if c.BookingCheckinAlertLeadMinutes != 30 {
 		t.Errorf("BookingCheckinAlertLeadMinutes = %d, want 30", c.BookingCheckinAlertLeadMinutes)
+	}
+	// The default has to be the business's own zone and it has to be loadable: an
+	// unset APP_TIMEZONE is the normal case, and every admin date range depends on it.
+	if c.AppTimeZone != "Asia/Ho_Chi_Minh" {
+		t.Errorf("AppTimeZone = %q, want Asia/Ho_Chi_Minh", c.AppTimeZone)
+	}
+	if _, err := time.LoadLocation(c.AppTimeZone); err != nil {
+		t.Errorf("time.LoadLocation(%q) error = %v", c.AppTimeZone, err)
 	}
 }
 

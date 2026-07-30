@@ -84,6 +84,9 @@ type Deps struct {
 	BookingAdminUC    bookingadminuc.IUseCase
 	BillingUC         billinguc.IUseCase
 	OverviewUC        overviewuc.IUseCase
+	// Location is the business's zone, resolved from config.AppTimeZone once at
+	// startup so a bad zone name fails the boot rather than the first admin request.
+	Location *time.Location
 }
 
 func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
@@ -150,8 +153,17 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	adminhttp.InitHomes(adminGroup, deps.HomeAdminUC, handleErr, handleOK)
 	adminhttp.InitPricingRules(adminGroup, deps.PricingAdminUC, handleErr, handleOK)
 	adminhttp.InitBlockedSlots(adminGroup, deps.BlockedSlotUC, handleErr, handleOK)
-	adminhttp.InitBookings(adminGroup, deps.BookingAdminUC, handleErr, handleOK)
-	adminhttp.InitOverview(adminGroup, deps.OverviewUC, handleErr, handleOK)
+	// time.Date and time.ParseInLocation panic on a nil Location and NewServer has no
+	// error return, so a caller that forgot the field lands on UTC rather than taking
+	// down the first admin request. cmd/main.go cannot reach here with nil: it fails
+	// the boot on an unparseable APP_TIMEZONE.
+	loc := deps.Location
+	if loc == nil {
+		log.Error("no APP_TIMEZONE location wired; admin date parsing falls back to UTC")
+		loc = time.UTC
+	}
+	adminhttp.InitBookings(adminGroup, deps.BookingAdminUC, handleErr, handleOK, loc)
+	adminhttp.InitOverview(adminGroup, deps.OverviewUC, handleErr, handleOK, loc)
 
 	return &Server{echo: e, cfg: cfg, log: log}
 }

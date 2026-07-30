@@ -13,6 +13,14 @@ type Config struct {
 	AppName     string `envconfig:"APP_NAME" default:"laverte-home-backend"`
 	Environment string `envconfig:"ENVIRONMENT" default:"development"`
 
+	// AppTimeZone is the business's own clock, and every ?date=YYYY-MM-DD an admin
+	// sends means a day in it. Nothing pins the container's zone, so parsing those
+	// dates in the host's location silently shifts the window by the UTC offset —
+	// seven hours at both ends of a revenue range, with nothing to signal it.
+	// Distinct from GoogleCalendarTimeZone, which is a field in a Calendar API
+	// payload rather than a parsing default.
+	AppTimeZone string `envconfig:"APP_TIMEZONE" default:"Asia/Ho_Chi_Minh"`
+
 	PostgresHost     string `envconfig:"POSTGRES_HOST" default:"localhost"`
 	PostgresPort     string `envconfig:"POSTGRES_PORT" default:"5432"`
 	PostgresUser     string `envconfig:"POSTGRES_USER" default:"laverte"`

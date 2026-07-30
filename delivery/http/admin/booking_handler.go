@@ -20,10 +20,13 @@ type BookingHandler struct {
 	uc        bookingadminuc.IUseCase
 	handleErr HandleErrFunc
 	handleOK  HandleOKFunc
+	// loc is the business's zone, resolved once at startup. A ?date= is a day in it,
+	// not in whatever zone the container happens to run in.
+	loc *time.Location
 }
 
-func newBookingHandler(uc bookingadminuc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc) *BookingHandler {
-	return &BookingHandler{uc: uc, handleErr: handleErr, handleOK: handleOK}
+func newBookingHandler(uc bookingadminuc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc, loc *time.Location) *BookingHandler {
+	return &BookingHandler{uc: uc, handleErr: handleErr, handleOK: handleOK, loc: loc}
 }
 
 func (h *BookingHandler) list(c echo.Context) error {
@@ -32,9 +35,9 @@ func (h *BookingHandler) list(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid home_id"})
 	}
 
-	day := time.Now()
+	day := time.Now().In(h.loc)
 	if raw := c.QueryParam("date"); raw != "" {
-		day, err = time.ParseInLocation(dateLayout, raw, time.Now().Location())
+		day, err = time.ParseInLocation(dateLayout, raw, h.loc)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid date, want YYYY-MM-DD"})
 		}

@@ -77,28 +77,33 @@ func (stubBookingUC) Create(context.Context, payload.CreateBookingRequest) (*pre
 	return nil, nil
 }
 
-type stubBookingAdminUC struct{}
+// stubBookingAdminUC records the day it was handed so a router test can assert
+// which clock the handler parsed ?date= in.
+type stubBookingAdminUC struct{ gotDay time.Time }
 
-func (stubBookingAdminUC) ListByHomeAndDate(context.Context, uint, time.Time) ([]presenter.AdminBookingResponse, error) {
+func (s *stubBookingAdminUC) ListByHomeAndDate(_ context.Context, _ uint, day time.Time) ([]presenter.AdminBookingResponse, error) {
+	s.gotDay = day
 	return nil, nil
 }
-func (stubBookingAdminUC) CreateWalkIn(context.Context, payload.CreateWalkInBookingRequest, uint) (*presenter.AdminBookingResponse, error) {
+func (*stubBookingAdminUC) CreateWalkIn(context.Context, payload.CreateWalkInBookingRequest, uint) (*presenter.AdminBookingResponse, error) {
 	return nil, nil
 }
-func (stubBookingAdminUC) Cancel(context.Context, uint) error              { return nil }
-func (stubBookingAdminUC) Complete(context.Context, uint) error            { return nil }
-func (stubBookingAdminUC) NoShow(context.Context, uint) error              { return nil }
-func (stubBookingAdminUC) SetLockCode(context.Context, uint, string) error { return nil }
-func (stubBookingAdminUC) SendLockCode(context.Context, uint) error        { return nil }
+func (*stubBookingAdminUC) Cancel(context.Context, uint) error              { return nil }
+func (*stubBookingAdminUC) Complete(context.Context, uint) error            { return nil }
+func (*stubBookingAdminUC) NoShow(context.Context, uint) error              { return nil }
+func (*stubBookingAdminUC) SetLockCode(context.Context, uint, string) error { return nil }
+func (*stubBookingAdminUC) SendLockCode(context.Context, uint) error        { return nil }
 
 type stubBillingUC struct{}
 
 func (stubBillingUC) HandleSePayWebhook(context.Context, []byte, http.Header) error { return nil }
 
-type stubOverviewUC struct{}
+// stubOverviewUC records the range it was handed, for the same reason.
+type stubOverviewUC struct{ gotFrom, gotTo time.Time }
 
-func (stubOverviewUC) Summary(context.Context, time.Time, time.Time) (*presenter.OverviewResponse, error) {
-	return nil, nil
+func (s *stubOverviewUC) Summary(_ context.Context, from, to time.Time) (*presenter.OverviewResponse, error) {
+	s.gotFrom, s.gotTo = from, to
+	return &presenter.OverviewResponse{}, nil
 }
 
 // stubTokenStore reports nothing revoked, so router tests need no Redis.
@@ -122,9 +127,9 @@ func newTestServer() *Server {
 		PricingAdminUC:    stubPricingAdminUC{},
 		BlockedSlotUC:     stubBlockedSlotUC{},
 		BookingUC:         stubBookingUC{},
-		BookingAdminUC:    stubBookingAdminUC{},
+		BookingAdminUC:    &stubBookingAdminUC{},
 		BillingUC:         stubBillingUC{},
-		OverviewUC:        stubOverviewUC{},
+		OverviewUC:        &stubOverviewUC{},
 	})
 }
 
@@ -158,9 +163,9 @@ func TestAdminHomeCreateRejectsEmptyBody(t *testing.T) {
 		PricingAdminUC:    stubPricingAdminUC{},
 		BlockedSlotUC:     stubBlockedSlotUC{},
 		BookingUC:         stubBookingUC{},
-		BookingAdminUC:    stubBookingAdminUC{},
+		BookingAdminUC:    &stubBookingAdminUC{},
 		BillingUC:         stubBillingUC{},
-		OverviewUC:        stubOverviewUC{},
+		OverviewUC:        &stubOverviewUC{},
 	})
 
 	token, err := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7}, time.Hour)
@@ -176,6 +181,103 @@ func TestAdminHomeCreateRejectsEmptyBody(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+// testZone is deliberately an offset no host runs on, so a handler that fell back
+// to time.Now().Location() cannot accidentally agree with it.
+var testZone = time.FixedZone("TESTZONE", 13*60*60)
+
+// adminServer wires a router whose admin date parsing must use testZone, and hands
+// back the recording stubs so a test can read what the handlers computed.
+func adminServer(t *testing.T) (*Server, *stubBookingAdminUC, *stubOverviewUC, string) {
+	t.Helper()
+	cfg := config.Config{
+		FrontendURL: "http://localhost:3000", JWTAccessSecret: "test-secret", AdminUserIDs: []uint{7},
+		RateLimitAuthedPerMin: 100,
+	}
+	bookings := &stubBookingAdminUC{}
+	overview := &stubOverviewUC{}
+	srv := NewServer(cfg, zap.NewNop(), Deps{
+		Limiter:           ratelimit.NewMemory(),
+		TokenStore:        stubTokenStore{},
+		AuthUC:            stubAuthUC{},
+		AdminUC:           stubAdminUC{},
+		AdminRoleResolver: jwtmw.AdminRoleResolverFunc(func(context.Context, uint) (string, error) { return "", nil }),
+		HomeAdminUC:       stubHomeAdminUC{},
+		PricingAdminUC:    stubPricingAdminUC{},
+		BlockedSlotUC:     stubBlockedSlotUC{},
+		BookingUC:         stubBookingUC{},
+		BookingAdminUC:    bookings,
+		BillingUC:         stubBillingUC{},
+		OverviewUC:        overview,
+		Location:          testZone,
+	})
+	token, err := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7}, time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+	return srv, bookings, overview, token
+}
+
+func adminGET(t *testing.T, srv *Server, token, target string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Echo().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want 200 (body: %s)", target, rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdminBookingListParsesDateInConfiguredZone pins which clock a ?date= means.
+// Nothing in the deployment sets TZ, so on a UTC container a date parsed in the
+// host's zone returns a 24-hour window shifted by the business's UTC offset — the
+// admin sees a day's bookings that is not the day they asked for.
+func TestAdminBookingListParsesDateInConfiguredZone(t *testing.T) {
+	srv, bookings, _, token := adminServer(t)
+
+	adminGET(t, srv, token, "/api/v1/admin/bookings?home_id=1&date=2026-08-01")
+
+	want := time.Date(2026, 8, 1, 0, 0, 0, 0, testZone)
+	if !bookings.gotDay.Equal(want) {
+		t.Errorf("day = %v, want %v (midnight in the configured zone)", bookings.gotDay, want)
+	}
+}
+
+// TestAdminOverviewParsesRangeInConfiguredZone is the same proof for the revenue
+// range, where the shift moves takings between periods at both ends.
+func TestAdminOverviewParsesRangeInConfiguredZone(t *testing.T) {
+	srv, _, overview, token := adminServer(t)
+
+	adminGET(t, srv, token, "/api/v1/admin/overview?from=2026-08-01&to=2026-09-01")
+
+	wantFrom := time.Date(2026, 8, 1, 0, 0, 0, 0, testZone)
+	wantTo := time.Date(2026, 9, 1, 0, 0, 0, 0, testZone)
+	if !overview.gotFrom.Equal(wantFrom) {
+		t.Errorf("from = %v, want %v", overview.gotFrom, wantFrom)
+	}
+	if !overview.gotTo.Equal(wantTo) {
+		t.Errorf("to = %v, want %v", overview.gotTo, wantTo)
+	}
+}
+
+// The default month-to-date window is built from time.Now() rather than a query
+// param, so it needs its own guard: a host-zone "now" can put the boundaries in the
+// wrong month entirely near a month edge.
+func TestAdminOverviewDefaultWindowUsesConfiguredZone(t *testing.T) {
+	srv, _, overview, token := adminServer(t)
+
+	adminGET(t, srv, token, "/api/v1/admin/overview")
+
+	now := time.Now().In(testZone)
+	wantFrom := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, testZone)
+	if !overview.gotFrom.Equal(wantFrom) {
+		t.Errorf("from = %v, want %v (first of the month in the configured zone)", overview.gotFrom, wantFrom)
+	}
+	if _, offset := overview.gotTo.Zone(); offset != 13*60*60 {
+		t.Errorf("to offset = %ds, want the configured zone's 46800s", offset)
 	}
 }
 

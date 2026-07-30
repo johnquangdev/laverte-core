@@ -1,13 +1,15 @@
 package admin
 
 import (
+	"time"
+
 	"github.com/labstack/echo/v4"
 
 	bookingadminuc "github.com/johnquangdev/laverte-home/usecase/bookingadmin"
 )
 
-func InitBookings(g *echo.Group, uc bookingadminuc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc) {
-	h := newBookingHandler(uc, handleErr, handleOK)
+func InitBookings(g *echo.Group, uc bookingadminuc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc, loc *time.Location) {
+	h := newBookingHandler(uc, handleErr, handleOK, loc)
 	bookings := g.Group("/bookings")
 	bookings.GET("", h.list)
 	bookings.POST("", h.create)
