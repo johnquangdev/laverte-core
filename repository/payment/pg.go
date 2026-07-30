@@ -65,3 +65,9 @@ func (r *pgRepository) SumPaidBetween(ctx context.Context, from, to time.Time) (
 		Select("COALESCE(SUM(amount), 0)").Scan(&total).Error
 	return total, err
 }
+
+func (r *pgRepository) MarkExpiredIfPending(ctx context.Context, paymentID uint) error {
+	return r.getDB(ctx).Model(&model.Payment{}).
+		Where("id = ? AND status = ?", paymentID, model.PaymentStatusPending).
+		Update("status", model.PaymentStatusExpired).Error
+}

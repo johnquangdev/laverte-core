@@ -27,4 +27,9 @@ type IRepository interface {
 	MarkPaidIfPending(ctx context.Context, paymentID uint, externalRef string, paidAt time.Time) (bool, error)
 	// SumPaidBetween totals paid amounts over [from, to).
 	SumPaidBetween(ctx context.Context, from, to time.Time) (int64, error)
+	// MarkExpiredIfPending flips a payment to expired only while it is still
+	// pending, so the expiry sweep can never overwrite a webhook that already
+	// marked it paid. The payment repo deliberately exposes no generic Update —
+	// every status change is one of these guarded transitions.
+	MarkExpiredIfPending(ctx context.Context, paymentID uint) error
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/johnquangdev/laverte-home/config"
 	httpserver "github.com/johnquangdev/laverte-home/delivery/http"
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
+	"github.com/johnquangdev/laverte-home/delivery/job"
 	"github.com/johnquangdev/laverte-home/migrations"
 	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
 	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
@@ -26,6 +27,7 @@ import (
 	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
 	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
 	bookingadminuc "github.com/johnquangdev/laverte-home/usecase/bookingadmin"
+	bookingjobsuc "github.com/johnquangdev/laverte-home/usecase/bookingjobs"
 	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
 	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
 	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
@@ -105,6 +107,13 @@ func main() {
 		BookingAdminUC:    bookingAdminUC,
 		BillingUC:         billingUC,
 	})
+
+	bookingJobsUC := bookingjobsuc.New(bookings, payments, notifier, log, *cfg)
+
+	j := job.New(bookingJobsUC, log)
+	j.Start()
+	defer j.Stop()
+
 	log.Info("starting server", zap.String("port", cfg.Port))
 	if err := srv.Start(); err != nil {
 		log.Fatal("server error", zap.Error(err))

@@ -205,6 +205,7 @@ func (f *fakePaymentRepo) MarkPaidIfPending(context.Context, uint, string, time.
 func (f *fakePaymentRepo) SumPaidBetween(context.Context, time.Time, time.Time) (int64, error) {
 	return 0, nil
 }
+func (f *fakePaymentRepo) MarkExpiredIfPending(context.Context, uint) error { return nil }
 
 type fakePricing struct {
 	price int64

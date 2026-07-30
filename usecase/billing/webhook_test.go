@@ -127,6 +127,8 @@ func (f *fakePaymentRepo) SumPaidBetween(context.Context, time.Time, time.Time) 
 	return 0, nil
 }
 
+func (f *fakePaymentRepo) MarkExpiredIfPending(context.Context, uint) error { return nil }
+
 type fakeHomeRepo struct{ home *model.Home }
 
 func (f *fakeHomeRepo) Create(context.Context, *model.Home) error { return nil }
