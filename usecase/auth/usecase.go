@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -76,6 +78,49 @@ func (uc *UseCase) Callback(ctx context.Context, req payload.GoogleCallbackReque
 		if err := uc.userRepo.Create(ctx, user); err != nil {
 			return nil, err
 		}
+	}
+
+	return uc.issueTokenPair(ctx, user, uuid.New().String())
+}
+
+func (uc *UseCase) PasswordLogin(ctx context.Context, req payload.PasswordLoginRequest) (*presenter.SessionResponse, error) {
+	if uc.cfg.Environment != "development" {
+		return nil, apperr.Unauthorized(errors.New("password login disabled"))
+	}
+	if strings.TrimSpace(uc.cfg.LocalAdminPassword) == "" {
+		return nil, apperr.Unauthorized(errors.New("password login disabled"))
+	}
+
+	username := strings.TrimSpace(req.Username)
+	password := req.Password
+	if username == "" ||
+		subtle.ConstantTimeCompare([]byte(username), []byte(uc.cfg.LocalAdminUsername)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(password), []byte(uc.cfg.LocalAdminPassword)) != 1 {
+		return nil, apperr.Unauthorized(errors.New("invalid credentials"))
+	}
+
+	user, err := uc.userRepo.GetByOAuth(ctx, "local", username)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
+		}
+		displayName := username
+		user = &model.User{
+			Email:         fmt.Sprintf("%s@laverte-home.local", username),
+			Name:          &displayName,
+			OAuthProvider: "local",
+			OAuthID:       username,
+			Role:          model.RoleAdmin,
+		}
+		if err := uc.userRepo.Create(ctx, user); err != nil {
+			return nil, err
+		}
+	} else if user.Role != model.RoleAdmin && user.Role != model.RoleSuperAdmin {
+		now := time.Now()
+		if err := uc.userRepo.SetRole(ctx, user.ID, model.RoleAdmin, nil, &now); err != nil {
+			return nil, err
+		}
+		user.Role = model.RoleAdmin
 	}
 
 	return uc.issueTokenPair(ctx, user, uuid.New().String())

@@ -2,6 +2,12 @@
 *.env
 !.env.example
 
+/web/node_modules/
+/web/dist/
+
 # stray package binaries left by `go build .` (e.g. the go-guard hook)
 /cmd/cmd
 /cmd/migrate/migrate
+
+web/node_modules/
+web/dist/

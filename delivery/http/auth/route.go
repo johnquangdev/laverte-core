@@ -10,6 +10,7 @@ func Init(g *echo.Group, uc authuc.IUseCase, handleErr HandleErrFunc, handleOK H
 	h := newHandler(uc, handleErr, handleOK)
 	g.GET("/google/login-url", h.loginURL)
 	g.POST("/google/callback", h.callback)
+	g.POST("/password", h.passwordLogin)
 	g.POST("/refresh", h.refresh)
 	g.POST("/logout", h.logout)
 }

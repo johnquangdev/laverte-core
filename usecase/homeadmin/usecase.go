@@ -59,3 +59,18 @@ func (uc *UseCase) List(ctx context.Context) ([]presenter.HomeResponse, error) {
 	}
 	return out, nil
 }
+
+func (uc *UseCase) ListActive(ctx context.Context) ([]presenter.PublicHomeResponse, error) {
+	homes, err := uc.repo.List(ctx)
+	if err != nil {
+		return nil, apperr.Internal(err)
+	}
+	out := make([]presenter.PublicHomeResponse, 0, len(homes))
+	for _, h := range homes {
+		if !h.IsActive {
+			continue
+		}
+		out = append(out, presenter.ToPublicHomeResponse(h))
+	}
+	return out, nil
+}

@@ -26,6 +26,9 @@ func (stubAuthUC) LoginURL(context.Context) (*presenter.GoogleLoginURLResponse, 
 func (stubAuthUC) Callback(context.Context, payload.GoogleCallbackRequest) (*presenter.SessionResponse, error) {
 	return nil, nil
 }
+func (stubAuthUC) PasswordLogin(context.Context, payload.PasswordLoginRequest) (*presenter.SessionResponse, error) {
+	return nil, nil
+}
 func (stubAuthUC) RefreshToken(context.Context, string) (*presenter.SessionResponse, error) {
 	return nil, nil
 }
@@ -48,6 +51,9 @@ func (stubHomeAdminUC) Update(context.Context, uint, payload.UpdateHomeRequest) 
 	return nil, nil
 }
 func (stubHomeAdminUC) List(context.Context) ([]presenter.HomeResponse, error) { return nil, nil }
+func (stubHomeAdminUC) ListActive(context.Context) ([]presenter.PublicHomeResponse, error) {
+	return nil, nil
+}
 
 type stubPricingAdminUC struct{}
 

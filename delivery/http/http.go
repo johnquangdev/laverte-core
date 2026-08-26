@@ -15,6 +15,7 @@ import (
 	adminhttp "github.com/johnquangdev/laverte-home/delivery/http/admin"
 	authhttp "github.com/johnquangdev/laverte-home/delivery/http/auth"
 	bookinghttp "github.com/johnquangdev/laverte-home/delivery/http/booking"
+	homehttp "github.com/johnquangdev/laverte-home/delivery/http/home"
 	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
 	webhookhttp "github.com/johnquangdev/laverte-home/delivery/http/webhook"
 	apperr "github.com/johnquangdev/laverte-home/errors"
@@ -140,6 +141,7 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	bookingIPLimit := jwtmw.RateLimitByIP("booking", deps.Limiter, cfg.RateLimitBookingPerMinIP, window)
 	bookingPhoneLimit := jwtmw.RateLimitByPhone("booking", deps.Limiter, cfg.RateLimitBookingPerMinPhone, window)
 	bookinghttp.Init(api.Group("/bookings", bookingIPLimit), deps.BookingUC, handleErr, handleOK, bookingPhoneLimit)
+	homehttp.Init(api.Group("/homes", ipLimit), deps.HomeAdminUC, handleErr, handleOK)
 
 	// The provider's own retries are the load here, so this limit is much
 	// higher than the guest-facing ones.

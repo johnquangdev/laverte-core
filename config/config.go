@@ -44,6 +44,9 @@ type Config struct {
 
 	AdminUserIDs []uint `envconfig:"ADMIN_USER_IDS"`
 
+	LocalAdminUsername string `envconfig:"LOCAL_ADMIN_USERNAME" default:"admin"`
+	LocalAdminPassword string `envconfig:"LOCAL_ADMIN_PASSWORD"`
+
 	SePayAPIKey         string `envconfig:"SEPAY_API_KEY"`
 	SePayBankAccount    string `envconfig:"SEPAY_BANK_ACCOUNT"`
 	SePayBankCode       string `envconfig:"SEPAY_BANK_CODE"`
