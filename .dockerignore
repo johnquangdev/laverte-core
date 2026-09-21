@@ -1,0 +1,6 @@
+.git
+.env
+.env.*
+cmd/cmd
+docs
+*_test.go

@@ -1,0 +1,45 @@
+# 2.4: newest format docker-compose 1.25 accepts that still honours
+# depends_on.condition (dropped in the 3.x schema).
+version: '2.4'
+
+services:
+  api:
+    image: ghcr.io/johnquangdev/laverte-core:latest
+    restart: unless-stopped
+    env_file: [.env.production]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_started}
+    networks: [internal, kpa_network]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=kpa_network
+      - traefik.http.routers.laverte-be.rule=Host(`be.laverte.vn`)
+      - traefik.http.routers.laverte-be.entrypoints=websecure
+      - traefik.http.routers.laverte-be.tls.certresolver=letsencrypt
+      - traefik.http.services.laverte-be.loadbalancer.server.port=14000
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: [.env.production]
+    volumes: [pg_data:/var/lib/postgresql/data]
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U laverte"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks: [internal]
+
+volumes:
+  pg_data:
+
+networks:
+  internal:
+  kpa_network:
+    external: true
