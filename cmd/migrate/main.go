@@ -7,8 +7,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	migrate "github.com/rubenv/sql-migrate"
 
-	"github.com/johnquangdev/laverte-home/config"
-	"github.com/johnquangdev/laverte-home/migrations"
+	"github.com/johnquangdev/laverte-core/config"
+	"github.com/johnquangdev/laverte-core/migrations"
 )
 
 func main() {

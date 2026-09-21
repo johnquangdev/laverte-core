@@ -3,7 +3,7 @@ package auth
 import (
 	"github.com/labstack/echo/v4"
 
-	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
+	authuc "github.com/johnquangdev/laverte-core/usecase/auth"
 )
 
 func Init(g *echo.Group, uc authuc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc) {

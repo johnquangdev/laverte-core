@@ -6,8 +6,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/payload"
-	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
+	"github.com/johnquangdev/laverte-core/payload"
+	pricingadminuc "github.com/johnquangdev/laverte-core/usecase/pricingadmin"
 )
 
 type PricingRuleHandler struct {

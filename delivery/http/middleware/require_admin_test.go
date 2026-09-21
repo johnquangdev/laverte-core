@@ -9,9 +9,9 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/config"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/util"
+	"github.com/johnquangdev/laverte-core/config"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/util"
 )
 
 func withClaims(c echo.Context, userID uint) {

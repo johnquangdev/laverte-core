@@ -3,13 +3,13 @@ package billing
 import (
 	"go.uber.org/zap"
 
-	"github.com/johnquangdev/laverte-home/config"
-	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
-	homerepo "github.com/johnquangdev/laverte-home/repository/home"
-	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
-	"github.com/johnquangdev/laverte-home/util/checkout"
-	"github.com/johnquangdev/laverte-home/util/gcalendar"
-	"github.com/johnquangdev/laverte-home/util/notify"
+	"github.com/johnquangdev/laverte-core/config"
+	bookingrepo "github.com/johnquangdev/laverte-core/repository/booking"
+	homerepo "github.com/johnquangdev/laverte-core/repository/home"
+	paymentrepo "github.com/johnquangdev/laverte-core/repository/payment"
+	"github.com/johnquangdev/laverte-core/util/checkout"
+	"github.com/johnquangdev/laverte-core/util/gcalendar"
+	"github.com/johnquangdev/laverte-core/util/notify"
 )
 
 type UseCase struct {

@@ -8,7 +8,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/config"
+	"github.com/johnquangdev/laverte-core/config"
 )
 
 var (

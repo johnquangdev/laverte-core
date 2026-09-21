@@ -12,13 +12,13 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/config"
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
-	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
-	"github.com/johnquangdev/laverte-home/util/checkout"
+	"github.com/johnquangdev/laverte-core/config"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	bookingrepo "github.com/johnquangdev/laverte-core/repository/booking"
+	pricinguc "github.com/johnquangdev/laverte-core/usecase/pricing"
+	"github.com/johnquangdev/laverte-core/util/checkout"
 )
 
 type fakeBookingRepo struct {
@@ -138,6 +138,27 @@ func (f *fakeBookingRepo) ListByHomeAndDate(context.Context, uint, time.Time) ([
 	return nil, nil
 }
 
+// ListOccupyingBetween mirrors all three predicates of the real query — home, the
+// two slot-holding statuses, and half-open overlap. A fake that returned every
+// booking would let Availability look correct while telling a guest a released
+// hold still blocks the window. Map order is unspecified on purpose: the caller
+// is the one that must sort.
+func (f *fakeBookingRepo) ListOccupyingBetween(_ context.Context, homeID uint, from, to time.Time) ([]*model.Booking, error) {
+	var out []*model.Booking
+	for _, b := range f.byID {
+		if b.HomeID != homeID {
+			continue
+		}
+		if b.Status != model.BookingStatusPendingPayment && b.Status != model.BookingStatusConfirmed {
+			continue
+		}
+		if b.StartTime.Before(to) && b.EndTime.After(from) {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeBookingRepo) ListUpcomingMissingLockCode(context.Context, time.Time, time.Duration) ([]*model.Booking, error) {
 	return nil, nil
 }
@@ -205,12 +226,15 @@ func (f *fakeHomeRepo) GetByID(_ context.Context, id uint) (*model.Home, error) 
 }
 func (f *fakeHomeRepo) List(context.Context) ([]*model.Home, error) { return nil, nil }
 
-type fakeBlockedSlotRepo struct{ overlap bool }
+type fakeBlockedSlotRepo struct {
+	overlap bool
+	byHome  map[uint][]*model.BlockedSlot
+}
 
 func (f *fakeBlockedSlotRepo) Create(context.Context, *model.BlockedSlot) error { return nil }
 func (f *fakeBlockedSlotRepo) Delete(context.Context, uint) error               { return nil }
-func (f *fakeBlockedSlotRepo) ListByHome(context.Context, uint) ([]*model.BlockedSlot, error) {
-	return nil, nil
+func (f *fakeBlockedSlotRepo) ListByHome(_ context.Context, homeID uint) ([]*model.BlockedSlot, error) {
+	return f.byHome[homeID], nil
 }
 func (f *fakeBlockedSlotRepo) HasOverlap(context.Context, uint, time.Time, time.Time) (bool, error) {
 	return f.overlap, nil

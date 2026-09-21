@@ -10,11 +10,11 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/config"
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/util/oauth"
-	"github.com/johnquangdev/laverte-home/util/tokenstore"
+	"github.com/johnquangdev/laverte-core/config"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/util/oauth"
+	"github.com/johnquangdev/laverte-core/util/tokenstore"
 )
 
 type fakeUserRepo struct{ users map[uint]*model.User }

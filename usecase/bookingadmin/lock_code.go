@@ -6,8 +6,8 @@ import (
 
 	"go.uber.org/zap"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 func (uc *UseCase) SetLockCode(ctx context.Context, id uint, code string) error {

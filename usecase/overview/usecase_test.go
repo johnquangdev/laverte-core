@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 type fakePaymentRepo struct {
@@ -123,4 +123,10 @@ func TestSummarySurfacesRepoErrorAsAppErr(t *testing.T) {
 	if !ok || e.Code != apperr.CodeInternal {
 		t.Fatalf("Summary() error = %v, want CodeInternal", err)
 	}
+}
+
+// ListOccupyingBetween serves the public availability lookup, which this package
+// never calls.
+func (f *fakeBookingRepo) ListOccupyingBetween(context.Context, uint, time.Time, time.Time) ([]*model.Booking, error) {
+	return nil, nil
 }

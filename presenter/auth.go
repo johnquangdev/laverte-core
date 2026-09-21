@@ -1,6 +1,6 @@
 package presenter
 
-import "github.com/johnquangdev/laverte-home/model"
+import "github.com/johnquangdev/laverte-core/model"
 
 type GoogleLoginURLResponse struct {
 	URL string `json:"url"`

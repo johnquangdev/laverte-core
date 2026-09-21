@@ -6,12 +6,12 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/johnquangdev/laverte-home/config"
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
-	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
-	"github.com/johnquangdev/laverte-home/util/notify"
+	"github.com/johnquangdev/laverte-core/config"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	bookingrepo "github.com/johnquangdev/laverte-core/repository/booking"
+	paymentrepo "github.com/johnquangdev/laverte-core/repository/payment"
+	"github.com/johnquangdev/laverte-core/util/notify"
 )
 
 type UseCase struct {

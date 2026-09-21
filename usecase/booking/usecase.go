@@ -3,13 +3,13 @@ package booking
 import (
 	"go.uber.org/zap"
 
-	"github.com/johnquangdev/laverte-home/config"
-	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
-	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
-	homerepo "github.com/johnquangdev/laverte-home/repository/home"
-	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
-	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
-	"github.com/johnquangdev/laverte-home/util/checkout"
+	"github.com/johnquangdev/laverte-core/config"
+	blockedslotrepo "github.com/johnquangdev/laverte-core/repository/blockedslot"
+	bookingrepo "github.com/johnquangdev/laverte-core/repository/booking"
+	homerepo "github.com/johnquangdev/laverte-core/repository/home"
+	paymentrepo "github.com/johnquangdev/laverte-core/repository/payment"
+	pricinguc "github.com/johnquangdev/laverte-core/usecase/pricing"
+	"github.com/johnquangdev/laverte-core/util/checkout"
 )
 
 type UseCase struct {

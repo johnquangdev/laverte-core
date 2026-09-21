@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricingrule"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	pricingrulerepo "github.com/johnquangdev/laverte-core/repository/pricingrule"
 )
 
 type UseCase struct{ repo pricingrulerepo.IRepository }

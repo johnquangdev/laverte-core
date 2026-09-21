@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 // postgresUniqueViolation is the SQLSTATE Postgres raises when a unique index

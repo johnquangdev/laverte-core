@@ -7,11 +7,11 @@ import (
 
 	"gorm.io/gorm"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
-	userrepo "github.com/johnquangdev/laverte-home/repository/user"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
+	userrepo "github.com/johnquangdev/laverte-core/repository/user"
 )
 
 type UseCase struct {

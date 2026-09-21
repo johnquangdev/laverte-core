@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 // ErrActiveRuleExists is returned by Create when the partial unique index rejects

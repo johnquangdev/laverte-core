@@ -4,10 +4,10 @@ import (
 	"context"
 	"time"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/presenter"
-	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
-	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/presenter"
+	bookingrepo "github.com/johnquangdev/laverte-core/repository/booking"
+	paymentrepo "github.com/johnquangdev/laverte-core/repository/payment"
 )
 
 type UseCase struct {

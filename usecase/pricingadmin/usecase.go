@@ -7,11 +7,11 @@ import (
 
 	"gorm.io/gorm"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
-	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricingrule"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
+	pricingrulerepo "github.com/johnquangdev/laverte-core/repository/pricingrule"
 )
 
 type UseCase struct{ repo pricingrulerepo.IRepository }

@@ -12,16 +12,16 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/config"
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
-	refreshtokenrepo "github.com/johnquangdev/laverte-home/repository/refreshtoken"
-	userrepo "github.com/johnquangdev/laverte-home/repository/user"
-	"github.com/johnquangdev/laverte-home/util"
-	"github.com/johnquangdev/laverte-home/util/oauth"
-	"github.com/johnquangdev/laverte-home/util/tokenstore"
+	"github.com/johnquangdev/laverte-core/config"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
+	refreshtokenrepo "github.com/johnquangdev/laverte-core/repository/refreshtoken"
+	userrepo "github.com/johnquangdev/laverte-core/repository/user"
+	"github.com/johnquangdev/laverte-core/util"
+	"github.com/johnquangdev/laverte-core/util/oauth"
+	"github.com/johnquangdev/laverte-core/util/tokenstore"
 )
 
 type UseCase struct {

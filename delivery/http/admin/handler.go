@@ -6,9 +6,9 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/delivery/http/middleware"
-	"github.com/johnquangdev/laverte-home/payload"
-	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
+	"github.com/johnquangdev/laverte-core/delivery/http/middleware"
+	"github.com/johnquangdev/laverte-core/payload"
+	adminuc "github.com/johnquangdev/laverte-core/usecase/admin"
 )
 
 type HandleErrFunc func(c echo.Context, err error) error

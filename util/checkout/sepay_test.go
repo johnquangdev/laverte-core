@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/johnquangdev/laverte-home/config"
+	"github.com/johnquangdev/laverte-core/config"
 )
 
 const testWebhookSecret = "top-secret"

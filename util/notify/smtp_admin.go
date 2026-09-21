@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/smtp"
 
-	"github.com/johnquangdev/laverte-home/config"
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/config"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 // SMTPAdminNotifier is the admin channel. It carries one message: a confirmed

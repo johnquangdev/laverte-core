@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 // ErrDuplicateExternalRef means the provider's transaction id is already recorded

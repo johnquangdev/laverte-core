@@ -6,7 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/johnquangdev/laverte-home/config"
+	"github.com/johnquangdev/laverte-core/config"
 )
 
 // znsTimeout bounds a ZNS call. Notification is best-effort and called inline from

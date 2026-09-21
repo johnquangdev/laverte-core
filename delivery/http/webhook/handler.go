@@ -6,7 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	billinguc "github.com/johnquangdev/laverte-home/usecase/billing"
+	billinguc "github.com/johnquangdev/laverte-core/usecase/billing"
 )
 
 type HandleErrFunc func(c echo.Context, err error) error

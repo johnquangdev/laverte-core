@@ -6,9 +6,9 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/delivery/http/middleware"
-	"github.com/johnquangdev/laverte-home/payload"
-	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
+	"github.com/johnquangdev/laverte-core/delivery/http/middleware"
+	"github.com/johnquangdev/laverte-core/payload"
+	blockedslotuc "github.com/johnquangdev/laverte-core/usecase/blockedslot"
 )
 
 type BlockedSlotHandler struct {

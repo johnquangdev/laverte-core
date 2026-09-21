@@ -3,7 +3,7 @@ package home
 import (
 	"github.com/labstack/echo/v4"
 
-	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
+	homeadminuc "github.com/johnquangdev/laverte-core/usecase/homeadmin"
 )
 
 type HandleErrFunc func(c echo.Context, err error) error

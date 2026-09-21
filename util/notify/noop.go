@@ -3,7 +3,7 @@ package notify
 import (
 	"context"
 
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 type noopNotifier struct{}

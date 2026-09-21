@@ -5,7 +5,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/johnquangdev/laverte-home/config"
+	"github.com/johnquangdev/laverte-core/config"
 )
 
 func TestFromConfig(t *testing.T) {

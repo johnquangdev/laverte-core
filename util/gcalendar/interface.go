@@ -3,7 +3,7 @@ package gcalendar
 import (
 	"context"
 
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 // ICalendar pushes and removes a booking's event on a home's shared calendar.

@@ -8,13 +8,13 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
-	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
-	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
-	"github.com/johnquangdev/laverte-home/util/checkout"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
+	bookingrepo "github.com/johnquangdev/laverte-core/repository/booking"
+	pricinguc "github.com/johnquangdev/laverte-core/usecase/pricing"
+	"github.com/johnquangdev/laverte-core/util/checkout"
 )
 
 func (uc *UseCase) Create(ctx context.Context, req payload.CreateBookingRequest) (*presenter.BookingResponse, error) {

@@ -6,8 +6,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/config"
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/config"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 // AdminRoleResolver reports the admin tier a user currently holds — deliberately

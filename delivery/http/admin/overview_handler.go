@@ -6,7 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	overviewuc "github.com/johnquangdev/laverte-home/usecase/overview"
+	overviewuc "github.com/johnquangdev/laverte-core/usecase/overview"
 )
 
 type OverviewHandler struct {

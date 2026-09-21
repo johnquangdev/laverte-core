@@ -6,9 +6,9 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/config"
-	"github.com/johnquangdev/laverte-home/util"
-	"github.com/johnquangdev/laverte-home/util/tokenstore"
+	"github.com/johnquangdev/laverte-core/config"
+	"github.com/johnquangdev/laverte-core/util"
+	"github.com/johnquangdev/laverte-core/util/tokenstore"
 )
 
 type contextKey string

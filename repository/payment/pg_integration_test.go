@@ -7,8 +7,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/internal/testdb"
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/internal/testdb"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 func setupTestDB(t *testing.T) *gorm.DB {

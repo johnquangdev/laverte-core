@@ -5,9 +5,9 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	bookinguc "github.com/johnquangdev/laverte-core/usecase/booking"
 )
 
 // bindBookingRequest parses the body and publishes customer_phone into the
@@ -43,4 +43,13 @@ func bindBookingRequest(handleErr HandleErrFunc) echo.MiddlewareFunc {
 func Init(g *echo.Group, uc bookinguc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc, phoneLimit echo.MiddlewareFunc) {
 	h := newHandler(uc, handleErr, handleOK)
 	g.POST("", h.create, bindBookingRequest(handleErr), phoneLimit)
+}
+
+// InitAvailability mounts the availability lookup on the public homes group, not
+// on the bookings group: it shares the general public rate limit rather than the
+// much tighter booking one, so a guest browsing a calendar cannot exhaust the
+// quota they need to actually book.
+func InitAvailability(g *echo.Group, uc bookinguc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc) {
+	h := newHandler(uc, handleErr, handleOK)
+	g.GET("/:id/availability", h.availability)
 }

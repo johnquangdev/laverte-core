@@ -10,7 +10,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
+	apperr "github.com/johnquangdev/laverte-core/errors"
 )
 
 // fakeUC records the exact bytes it received so a test can prove the handler

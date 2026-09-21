@@ -7,7 +7,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/johnquangdev/laverte-home/config"
+	"github.com/johnquangdev/laverte-core/config"
 )
 
 type redisLimiter struct{ client *redis.Client }

@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 // postgresExclusionViolation is the SQLSTATE Postgres raises when an EXCLUDE
@@ -59,6 +59,15 @@ func (r *pgRepository) ListByHomeAndDate(ctx context.Context, homeID uint, day t
 	var out []*model.Booking
 	err := r.getDB(ctx).
 		Where("home_id = ? AND start_time < ? AND end_time > ?", homeID, end, start).
+		Order("start_time ASC").Find(&out).Error
+	return out, err
+}
+
+func (r *pgRepository) ListOccupyingBetween(ctx context.Context, homeID uint, from, to time.Time) ([]*model.Booking, error) {
+	var out []*model.Booking
+	err := r.getDB(ctx).
+		Where("home_id = ? AND status IN ? AND start_time < ? AND end_time > ?",
+			homeID, []string{model.BookingStatusPendingPayment, model.BookingStatusConfirmed}, to, from).
 		Order("start_time ASC").Find(&out).Error
 	return out, err
 }

@@ -3,7 +3,7 @@ package presenter
 import (
 	"time"
 
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 // AdminBookingResponse carries the same fields as BookingResponse plus the

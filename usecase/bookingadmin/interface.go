@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
 )
 
 type IUseCase interface {

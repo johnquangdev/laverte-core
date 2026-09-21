@@ -1,4 +1,4 @@
-module github.com/johnquangdev/laverte-home
+module github.com/johnquangdev/laverte-core
 
 go 1.25.0
 

@@ -4,7 +4,7 @@ import (
 	"github.com/robfig/cron/v3"
 	"go.uber.org/zap"
 
-	bookingjobsuc "github.com/johnquangdev/laverte-home/usecase/bookingjobs"
+	bookingjobsuc "github.com/johnquangdev/laverte-core/usecase/bookingjobs"
 )
 
 type Job struct {

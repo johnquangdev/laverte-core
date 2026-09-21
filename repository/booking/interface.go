@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 // ErrSlotConflict is returned by Create when the DB exclusion constraint
@@ -18,6 +18,11 @@ type IRepository interface {
 	GetPendingByPhone(ctx context.Context, phone string) (*model.Booking, error)
 	ListExpiredPending(ctx context.Context, now time.Time) ([]*model.Booking, error)
 	ListByHomeAndDate(ctx context.Context, homeID uint, day time.Time) ([]*model.Booking, error)
+	// ListOccupyingBetween returns the bookings overlapping [from, to) that hold the
+	// slot — the same two statuses the overlap exclusion constraint covers, so a
+	// caller can tell a guest exactly which windows a Create would be refused for.
+	// Half-open on both sides: a booking ending at from does not overlap it.
+	ListOccupyingBetween(ctx context.Context, homeID uint, from, to time.Time) ([]*model.Booking, error)
 	// ListUpcomingMissingLockCode returns confirmed bookings whose start_time
 	// is within [now, now+leadTime) and that have no door_lock_code yet and
 	// haven't been alerted on.

@@ -8,8 +8,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/johnquangdev/laverte-home/config"
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/config"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 type fakeBookingRepo struct {
@@ -489,4 +489,10 @@ func TestSendDueLockCodesReleasesClaimOnFailure(t *testing.T) {
 	if bookings.releaseCalls != 1 {
 		t.Errorf("releaseCalls = %d, want 1", bookings.releaseCalls)
 	}
+}
+
+// ListOccupyingBetween serves the public availability lookup, which this package
+// never calls.
+func (f *fakeBookingRepo) ListOccupyingBetween(context.Context, uint, time.Time, time.Time) ([]*model.Booking, error) {
+	return nil, nil
 }

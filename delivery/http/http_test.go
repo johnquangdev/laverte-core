@@ -10,12 +10,12 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/johnquangdev/laverte-home/config"
-	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
-	"github.com/johnquangdev/laverte-home/util"
-	"github.com/johnquangdev/laverte-home/util/ratelimit"
+	"github.com/johnquangdev/laverte-core/config"
+	jwtmw "github.com/johnquangdev/laverte-core/delivery/http/middleware"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
+	"github.com/johnquangdev/laverte-core/util"
+	"github.com/johnquangdev/laverte-core/util/ratelimit"
 )
 
 type stubAuthUC struct{}
@@ -80,6 +80,10 @@ func (stubBlockedSlotUC) ListByHome(context.Context, uint) ([]presenter.BlockedS
 type stubBookingUC struct{}
 
 func (stubBookingUC) Create(context.Context, payload.CreateBookingRequest) (*presenter.BookingResponse, error) {
+	return nil, nil
+}
+
+func (stubBookingUC) Availability(context.Context, uint, time.Time, time.Time) (*presenter.AvailabilityResponse, error) {
 	return nil, nil
 }
 

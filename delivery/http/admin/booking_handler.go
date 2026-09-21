@@ -8,9 +8,9 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/delivery/http/middleware"
-	"github.com/johnquangdev/laverte-home/payload"
-	bookingadminuc "github.com/johnquangdev/laverte-home/usecase/bookingadmin"
+	"github.com/johnquangdev/laverte-core/delivery/http/middleware"
+	"github.com/johnquangdev/laverte-core/payload"
+	bookingadminuc "github.com/johnquangdev/laverte-core/usecase/bookingadmin"
 )
 
 // dateLayout is the only date format admin query params accept.

@@ -5,8 +5,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/payload"
-	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
+	"github.com/johnquangdev/laverte-core/payload"
+	authuc "github.com/johnquangdev/laverte-core/usecase/auth"
 )
 
 type HandleErrFunc func(c echo.Context, err error) error

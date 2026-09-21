@@ -3,7 +3,7 @@ package admin
 import (
 	"github.com/labstack/echo/v4"
 
-	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
+	pricingadminuc "github.com/johnquangdev/laverte-core/usecase/pricingadmin"
 )
 
 func InitPricingRules(g *echo.Group, uc pricingadminuc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc) {

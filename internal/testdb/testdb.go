@@ -17,7 +17,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/migrations"
+	"github.com/johnquangdev/laverte-core/migrations"
 )
 
 // New skips the calling test when TEST_DATABASE_URL is unset. Otherwise it

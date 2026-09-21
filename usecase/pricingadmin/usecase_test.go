@@ -8,10 +8,10 @@ import (
 
 	"gorm.io/gorm"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	pricingrulerepo "github.com/johnquangdev/laverte-home/repository/pricingrule"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	pricingrulerepo "github.com/johnquangdev/laverte-core/repository/pricingrule"
 )
 
 type fakeRepo struct {

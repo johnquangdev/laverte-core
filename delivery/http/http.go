@@ -11,25 +11,25 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	"go.uber.org/zap"
 
-	"github.com/johnquangdev/laverte-home/config"
-	adminhttp "github.com/johnquangdev/laverte-home/delivery/http/admin"
-	authhttp "github.com/johnquangdev/laverte-home/delivery/http/auth"
-	bookinghttp "github.com/johnquangdev/laverte-home/delivery/http/booking"
-	homehttp "github.com/johnquangdev/laverte-home/delivery/http/home"
-	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
-	webhookhttp "github.com/johnquangdev/laverte-home/delivery/http/webhook"
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
-	authuc "github.com/johnquangdev/laverte-home/usecase/auth"
-	billinguc "github.com/johnquangdev/laverte-home/usecase/billing"
-	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
-	bookinguc "github.com/johnquangdev/laverte-home/usecase/booking"
-	bookingadminuc "github.com/johnquangdev/laverte-home/usecase/bookingadmin"
-	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
-	overviewuc "github.com/johnquangdev/laverte-home/usecase/overview"
-	pricingadminuc "github.com/johnquangdev/laverte-home/usecase/pricingadmin"
-	"github.com/johnquangdev/laverte-home/util/ratelimit"
-	"github.com/johnquangdev/laverte-home/util/tokenstore"
+	"github.com/johnquangdev/laverte-core/config"
+	adminhttp "github.com/johnquangdev/laverte-core/delivery/http/admin"
+	authhttp "github.com/johnquangdev/laverte-core/delivery/http/auth"
+	bookinghttp "github.com/johnquangdev/laverte-core/delivery/http/booking"
+	homehttp "github.com/johnquangdev/laverte-core/delivery/http/home"
+	jwtmw "github.com/johnquangdev/laverte-core/delivery/http/middleware"
+	webhookhttp "github.com/johnquangdev/laverte-core/delivery/http/webhook"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	adminuc "github.com/johnquangdev/laverte-core/usecase/admin"
+	authuc "github.com/johnquangdev/laverte-core/usecase/auth"
+	billinguc "github.com/johnquangdev/laverte-core/usecase/billing"
+	blockedslotuc "github.com/johnquangdev/laverte-core/usecase/blockedslot"
+	bookinguc "github.com/johnquangdev/laverte-core/usecase/booking"
+	bookingadminuc "github.com/johnquangdev/laverte-core/usecase/bookingadmin"
+	homeadminuc "github.com/johnquangdev/laverte-core/usecase/homeadmin"
+	overviewuc "github.com/johnquangdev/laverte-core/usecase/overview"
+	pricingadminuc "github.com/johnquangdev/laverte-core/usecase/pricingadmin"
+	"github.com/johnquangdev/laverte-core/util/ratelimit"
+	"github.com/johnquangdev/laverte-core/util/tokenstore"
 )
 
 type errBody struct {
@@ -141,7 +141,9 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	bookingIPLimit := jwtmw.RateLimitByIP("booking", deps.Limiter, cfg.RateLimitBookingPerMinIP, window)
 	bookingPhoneLimit := jwtmw.RateLimitByPhone("booking", deps.Limiter, cfg.RateLimitBookingPerMinPhone, window)
 	bookinghttp.Init(api.Group("/bookings", bookingIPLimit), deps.BookingUC, handleErr, handleOK, bookingPhoneLimit)
-	homehttp.Init(api.Group("/homes", ipLimit), deps.HomeAdminUC, handleErr, handleOK)
+	homes := api.Group("/homes", ipLimit)
+	homehttp.Init(homes, deps.HomeAdminUC, handleErr, handleOK)
+	bookinghttp.InitAvailability(homes, deps.BookingUC, handleErr, handleOK)
 
 	// The provider's own retries are the load here, so this limit is much
 	// higher than the guest-facing ones.

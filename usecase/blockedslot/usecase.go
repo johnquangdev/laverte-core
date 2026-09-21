@@ -6,11 +6,11 @@ import (
 
 	"gorm.io/gorm"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
-	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
+	blockedslotrepo "github.com/johnquangdev/laverte-core/repository/blockedslot"
 )
 
 type UseCase struct{ repo blockedslotrepo.IRepository }

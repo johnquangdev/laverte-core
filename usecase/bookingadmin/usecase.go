@@ -7,17 +7,17 @@ import (
 
 	"go.uber.org/zap"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
-	blockedslotrepo "github.com/johnquangdev/laverte-home/repository/blockedslot"
-	bookingrepo "github.com/johnquangdev/laverte-home/repository/booking"
-	homerepo "github.com/johnquangdev/laverte-home/repository/home"
-	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
-	pricinguc "github.com/johnquangdev/laverte-home/usecase/pricing"
-	"github.com/johnquangdev/laverte-home/util/gcalendar"
-	"github.com/johnquangdev/laverte-home/util/notify"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
+	blockedslotrepo "github.com/johnquangdev/laverte-core/repository/blockedslot"
+	bookingrepo "github.com/johnquangdev/laverte-core/repository/booking"
+	homerepo "github.com/johnquangdev/laverte-core/repository/home"
+	paymentrepo "github.com/johnquangdev/laverte-core/repository/payment"
+	pricinguc "github.com/johnquangdev/laverte-core/usecase/pricing"
+	"github.com/johnquangdev/laverte-core/util/gcalendar"
+	"github.com/johnquangdev/laverte-core/util/notify"
 )
 
 type UseCase struct {

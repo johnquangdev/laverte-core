@@ -10,11 +10,11 @@ import (
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/config"
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	paymentrepo "github.com/johnquangdev/laverte-home/repository/payment"
-	"github.com/johnquangdev/laverte-home/util/checkout"
+	"github.com/johnquangdev/laverte-core/config"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	paymentrepo "github.com/johnquangdev/laverte-core/repository/payment"
+	"github.com/johnquangdev/laverte-core/util/checkout"
 )
 
 type fakeBookingRepo struct {
@@ -644,4 +644,10 @@ func TestBookingIDFromMemo(t *testing.T) {
 			t.Errorf("bookingIDFromMemo(%q) = %d, want %d", tc.memo, got, tc.want)
 		}
 	}
+}
+
+// ListOccupyingBetween serves the public availability lookup, which this package
+// never calls.
+func (f *fakeBookingRepo) ListOccupyingBetween(context.Context, uint, time.Time, time.Time) ([]*model.Booking, error) {
+	return nil, nil
 }

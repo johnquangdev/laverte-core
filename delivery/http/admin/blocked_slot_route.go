@@ -3,7 +3,7 @@ package admin
 import (
 	"github.com/labstack/echo/v4"
 
-	blockedslotuc "github.com/johnquangdev/laverte-home/usecase/blockedslot"
+	blockedslotuc "github.com/johnquangdev/laverte-core/usecase/blockedslot"
 )
 
 func InitBlockedSlots(g *echo.Group, uc blockedslotuc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc) {

@@ -5,7 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	bookingadminuc "github.com/johnquangdev/laverte-home/usecase/bookingadmin"
+	bookingadminuc "github.com/johnquangdev/laverte-core/usecase/bookingadmin"
 )
 
 func InitBookings(g *echo.Group, uc bookingadminuc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc, loc *time.Location) {

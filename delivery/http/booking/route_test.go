@@ -11,10 +11,10 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/labstack/echo/v4"
 
-	jwtmw "github.com/johnquangdev/laverte-home/delivery/http/middleware"
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
-	"github.com/johnquangdev/laverte-home/util/ratelimit"
+	jwtmw "github.com/johnquangdev/laverte-core/delivery/http/middleware"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
+	"github.com/johnquangdev/laverte-core/util/ratelimit"
 )
 
 // testValidator runs go-playground validation the same way NewServer wires it
@@ -29,6 +29,10 @@ type fakeUC struct{ calls int }
 func (f *fakeUC) Create(context.Context, payload.CreateBookingRequest) (*presenter.BookingResponse, error) {
 	f.calls++
 	return &presenter.BookingResponse{ID: uint(f.calls)}, nil
+}
+
+func (f *fakeUC) Availability(context.Context, uint, time.Time, time.Time) (*presenter.AvailabilityResponse, error) {
+	return &presenter.AvailabilityResponse{}, nil
 }
 
 func passErr(c echo.Context, _ error) error { return c.NoContent(http.StatusBadRequest) }

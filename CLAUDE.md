@@ -1,4 +1,4 @@
-# laverte-home
+# laverte-core
 
 Go backend for a homestay booking system: 3 properties in 2 tiers (`home`, `nest`).
 Guests book by the hour, overnight, or by the day, **without an account** — name and

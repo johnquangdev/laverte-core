@@ -10,8 +10,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/johnquangdev/laverte-home/internal/testdb"
-	"github.com/johnquangdev/laverte-home/model"
+	"github.com/johnquangdev/laverte-core/internal/testdb"
+	"github.com/johnquangdev/laverte-core/model"
 )
 
 func setupTestDB(t *testing.T) *gorm.DB {
@@ -837,5 +837,61 @@ func TestCountConfirmedBetweenFiltersStatusAndRange(t *testing.T) {
 	}
 	if got != 2 {
 		t.Errorf("CountConfirmedBetween() = %d, want 2 (confirmed + completed in range only)", got)
+	}
+}
+
+func TestListOccupyingBetweenFiltersHomeStatusAndRange(t *testing.T) {
+	db := setupTestDB(t)
+	getDB := func(context.Context) *gorm.DB { return db }
+	repo := NewPG(getDB)
+	ctx := context.Background()
+
+	home := &model.Home{Name: "Availability Home", Category: model.HomeCategoryHome, IsActive: true}
+	other := &model.Home{Name: "Availability Other Home", Category: model.HomeCategoryNest, IsActive: true}
+	for _, h := range []*model.Home{home, other} {
+		if err := db.Create(h).Error; err != nil {
+			t.Fatalf("create home: %v", err)
+		}
+	}
+
+	from := time.Now().Add(time.Hour).Truncate(time.Second)
+	to := from.Add(10 * time.Hour)
+
+	seed := func(homeID uint, phone, status string, start, end time.Time) {
+		b := &model.Booking{
+			HomeID: homeID, CustomerName: "A", CustomerPhone: phone,
+			StartTime: start, EndTime: end, BookingType: model.BookingTypeHourly,
+			ComputedPrice: 100000, Status: status,
+		}
+		if status == model.BookingStatusPendingPayment {
+			b.ExpiresAt = expiresIn(time.Hour)
+		}
+		if err := db.Create(b).Error; err != nil {
+			t.Fatalf("seed booking (status %s): %v", status, err)
+		}
+	}
+
+	seed(home.ID, "0900000030", model.BookingStatusConfirmed, from.Add(-2*time.Hour), from)
+	seed(home.ID, "0900000031", model.BookingStatusPendingPayment, from.Add(time.Hour), from.Add(2*time.Hour))
+	seed(home.ID, "0900000032", model.BookingStatusConfirmed, from.Add(3*time.Hour), from.Add(4*time.Hour))
+	// cancelled and completed sit outside the exclusion constraint, so they may
+	// share a window with each other without tripping it.
+	seed(home.ID, "0900000033", model.BookingStatusCancelled, from.Add(5*time.Hour), from.Add(6*time.Hour))
+	seed(home.ID, "0900000034", model.BookingStatusCompleted, from.Add(5*time.Hour), from.Add(6*time.Hour))
+	seed(home.ID, "0900000035", model.BookingStatusConfirmed, to.Add(time.Hour), to.Add(2*time.Hour))
+	seed(other.ID, "0900000036", model.BookingStatusConfirmed, from.Add(time.Hour), from.Add(2*time.Hour))
+
+	got, err := repo.ListOccupyingBetween(ctx, home.ID, from, to)
+	if err != nil {
+		t.Fatalf("ListOccupyingBetween() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2 (the hold and the confirmed booking inside the window)", len(got))
+	}
+	if !got[0].StartTime.Equal(from.Add(time.Hour)) || got[0].Status != model.BookingStatusPendingPayment {
+		t.Errorf("got[0] = %+v, want the pending hold first", got[0])
+	}
+	if !got[1].StartTime.Equal(from.Add(3*time.Hour)) || got[1].Status != model.BookingStatusConfirmed {
+		t.Errorf("got[1] = %+v, want the confirmed booking second", got[1])
 	}
 }

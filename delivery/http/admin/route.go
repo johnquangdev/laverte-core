@@ -3,7 +3,7 @@ package admin
 import (
 	"github.com/labstack/echo/v4"
 
-	adminuc "github.com/johnquangdev/laverte-home/usecase/admin"
+	adminuc "github.com/johnquangdev/laverte-core/usecase/admin"
 )
 
 // Init mounts admin-roster routes. superadminOnly must be

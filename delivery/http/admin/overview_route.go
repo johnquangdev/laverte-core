@@ -5,7 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	overviewuc "github.com/johnquangdev/laverte-home/usecase/overview"
+	overviewuc "github.com/johnquangdev/laverte-core/usecase/overview"
 )
 
 func InitOverview(g *echo.Group, uc overviewuc.IUseCase, handleErr HandleErrFunc, handleOK HandleOKFunc, loc *time.Location) {

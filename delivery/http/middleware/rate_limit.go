@@ -8,7 +8,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/util/ratelimit"
+	"github.com/johnquangdev/laverte-core/util/ratelimit"
 )
 
 func RateLimitByIP(name string, limiter ratelimit.ILimiter, limit int, window time.Duration) echo.MiddlewareFunc {

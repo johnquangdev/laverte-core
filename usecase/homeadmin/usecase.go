@@ -3,11 +3,11 @@ package homeadmin
 import (
 	"context"
 
-	apperr "github.com/johnquangdev/laverte-home/errors"
-	"github.com/johnquangdev/laverte-home/model"
-	"github.com/johnquangdev/laverte-home/payload"
-	"github.com/johnquangdev/laverte-home/presenter"
-	homerepo "github.com/johnquangdev/laverte-home/repository/home"
+	apperr "github.com/johnquangdev/laverte-core/errors"
+	"github.com/johnquangdev/laverte-core/model"
+	"github.com/johnquangdev/laverte-core/payload"
+	"github.com/johnquangdev/laverte-core/presenter"
+	homerepo "github.com/johnquangdev/laverte-core/repository/home"
 )
 
 type UseCase struct{ repo homerepo.IRepository }

@@ -6,8 +6,8 @@ import (
 
 	"github.com/labstack/echo/v4"
 
-	"github.com/johnquangdev/laverte-home/payload"
-	homeadminuc "github.com/johnquangdev/laverte-home/usecase/homeadmin"
+	"github.com/johnquangdev/laverte-core/payload"
+	homeadminuc "github.com/johnquangdev/laverte-core/usecase/homeadmin"
 )
 
 type HomeHandler struct {
