@@ -78,6 +78,28 @@ type Config struct {
 	RateLimitAuthedPerMin       int `envconfig:"RATE_LIMIT_AUTHED_PER_MIN" default:"120"`
 }
 
+// ZNSConfigured, SMTPConfigured, GoogleLoginConfigured and GoogleCalendarConfigured
+// are the one definition of "this integration is set up". The adapters and the
+// admin settings view both read them, so the screen cannot report an integration
+// as on while the adapter behind it has quietly fallen back to a no-op.
+func (c *Config) ZNSConfigured() bool {
+	return c.ZNSAccessToken != "" && c.ZNSBookingConfirmedTemplateID != "" && c.ZNSLockCodeTemplateID != ""
+}
+
+// SMTPConfigured needs a recipient as well as a host: a host with nowhere to
+// send fails every admin alert at the recipient guard.
+func (c *Config) SMTPConfigured() bool {
+	return c.SMTPHost != "" && c.AdminAlertEmail != ""
+}
+
+func (c *Config) GoogleLoginConfigured() bool {
+	return c.GoogleClientID != "" && c.GoogleClientSecret != "" && c.GoogleRedirectURI != ""
+}
+
+func (c *Config) GoogleCalendarConfigured() bool {
+	return c.GoogleCalendarCredentialsJSON != ""
+}
+
 func (c *Config) DatabaseURL() string {
 	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		c.PostgresHost, c.PostgresPort, c.PostgresUser, c.PostgresPassword, c.PostgresDB)

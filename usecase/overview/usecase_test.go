@@ -84,7 +84,7 @@ func (f *fakeBookingRepo) ReleaseHoldIfPending(context.Context, uint) (bool, err
 }
 
 func TestSummaryReportsRevenueAndCount(t *testing.T) {
-	uc := New(&fakePaymentRepo{sum: 4500000}, &fakeBookingRepo{count: 12})
+	uc := New(&fakePaymentRepo{sum: 4500000}, &fakeBookingRepo{count: 12}, nil, nil, time.UTC)
 	from := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	to := from.AddDate(0, 1, 0)
 
@@ -104,7 +104,7 @@ func TestSummaryReportsRevenueAndCount(t *testing.T) {
 }
 
 func TestSummaryRejectsNonPositiveRange(t *testing.T) {
-	uc := New(&fakePaymentRepo{}, &fakeBookingRepo{})
+	uc := New(&fakePaymentRepo{}, &fakeBookingRepo{}, nil, nil, time.UTC)
 	day := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 
 	_, err := uc.Summary(context.Background(), day, day)
@@ -115,7 +115,7 @@ func TestSummaryRejectsNonPositiveRange(t *testing.T) {
 }
 
 func TestSummarySurfacesRepoErrorAsAppErr(t *testing.T) {
-	uc := New(&fakePaymentRepo{err: errors.New("db down")}, &fakeBookingRepo{})
+	uc := New(&fakePaymentRepo{err: errors.New("db down")}, &fakeBookingRepo{}, nil, nil, time.UTC)
 	from := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 
 	_, err := uc.Summary(context.Background(), from, from.AddDate(0, 1, 0))

@@ -10,9 +10,22 @@ import (
 	pricingrulerepo "github.com/johnquangdev/laverte-core/repository/pricingrule"
 )
 
-type UseCase struct{ repo pricingrulerepo.IRepository }
+type UseCase struct {
+	repo pricingrulerepo.IRepository
+	// loc is the business's zone. An overnight window is a wall-clock rule in that
+	// zone, so a start time must be read there no matter which offset the client
+	// serialised it with: a guest's 22:00 sent as 15:00Z is still inside 22:00-06:00.
+	loc *time.Location
+}
 
-func New(repo pricingrulerepo.IRepository) IUseCase { return &UseCase{repo: repo} }
+// New panics on a nil loc: every window check would silently fall back to
+// whatever offset the request carried, which is the bug loc exists to prevent.
+func New(repo pricingrulerepo.IRepository, loc *time.Location) IUseCase {
+	if loc == nil {
+		panic("pricing.New: nil location")
+	}
+	return &UseCase{repo: repo, loc: loc}
+}
 
 func (uc *UseCase) Compute(ctx context.Context, category, bookingType string, start, end, at time.Time) (int64, error) {
 	rules, err := uc.repo.ListActiveByCategory(ctx, category, at)
@@ -35,7 +48,7 @@ func (uc *UseCase) Compute(ctx context.Context, category, bookingType string, st
 	case model.PricingRuleTypeHourly:
 		return computeHourly(rule, start, end)
 	case model.PricingRuleTypeOvernight, model.PricingRuleTypeDay:
-		return computeFlat(rule, start, end)
+		return computeFlat(rule, start.In(uc.loc), end)
 	default:
 		return 0, apperr.Validation(fmt.Sprintf("booking_type khong hop le: %q", bookingType))
 	}

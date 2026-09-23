@@ -27,6 +27,12 @@ func (r *pgRepository) GetByID(ctx context.Context, id uint) (*model.User, error
 	return &u, err
 }
 
+func (r *pgRepository) GetByEmail(ctx context.Context, email string) (*model.User, error) {
+	var u model.User
+	err := r.getDB(ctx).Where("lower(email) = lower(?)", email).First(&u).Error
+	return &u, err
+}
+
 func (r *pgRepository) Create(ctx context.Context, u *model.User) error {
 	return r.getDB(ctx).Create(u).Error
 }

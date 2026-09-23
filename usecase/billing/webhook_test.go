@@ -254,6 +254,7 @@ func (f *fakeProvider) VerifyWebhook(context.Context, []byte, http.Header) (*che
 type fakeNotifier struct {
 	confirmedCalls int
 	confirmErr     error
+	unmatchedCalls int
 }
 
 func (f *fakeNotifier) BookingConfirmed(context.Context, *model.Booking) error {
@@ -262,6 +263,36 @@ func (f *fakeNotifier) BookingConfirmed(context.Context, *model.Booking) error {
 }
 func (f *fakeNotifier) LockCode(context.Context, *model.Booking, string) error     { return nil }
 func (f *fakeNotifier) AdminLockCodeMissing(context.Context, *model.Booking) error { return nil }
+func (f *fakeNotifier) AdminUnmatchedTransfer(context.Context, *model.UnmatchedTransfer) error {
+	f.unmatchedCalls++
+	return nil
+}
+
+// fakeUnmatchedRepo models the unique index on sepay_transaction_ref: a second
+// record of the same ref is refused, which is what gates the admin alert.
+type fakeUnmatchedRepo struct {
+	rows []*model.UnmatchedTransfer
+}
+
+func (f *fakeUnmatchedRepo) RecordIfNew(_ context.Context, t *model.UnmatchedTransfer) (bool, error) {
+	for _, r := range f.rows {
+		if r.SePayTransactionRef == t.SePayTransactionRef {
+			return false, nil
+		}
+	}
+	cp := *t
+	f.rows = append(f.rows, &cp)
+	return true, nil
+}
+func (f *fakeUnmatchedRepo) GetByID(context.Context, uint) (*model.UnmatchedTransfer, error) {
+	return nil, gorm.ErrRecordNotFound
+}
+func (f *fakeUnmatchedRepo) List(context.Context, bool, int) ([]*model.UnmatchedTransfer, error) {
+	return f.rows, nil
+}
+func (f *fakeUnmatchedRepo) ResolveIfOpen(context.Context, uint, uint, string, time.Time) (bool, error) {
+	return false, nil
+}
 
 type fakeCalendar struct {
 	eventID     string
@@ -277,13 +308,14 @@ func (f *fakeCalendar) CreateEvent(context.Context, string, *model.Booking) (str
 func (f *fakeCalendar) DeleteEvent(context.Context, string, string) error { return nil }
 
 type harness struct {
-	uc       IUseCase
-	bookings *fakeBookingRepo
-	payments *fakePaymentRepo
-	homes    *fakeHomeRepo
-	provider *fakeProvider
-	notifier *fakeNotifier
-	calendar *fakeCalendar
+	uc        IUseCase
+	bookings  *fakeBookingRepo
+	payments  *fakePaymentRepo
+	unmatched *fakeUnmatchedRepo
+	homes     *fakeHomeRepo
+	provider  *fakeProvider
+	notifier  *fakeNotifier
+	calendar  *fakeCalendar
 }
 
 func newHarness(booking *model.Booking, event *checkout.WebhookEvent, verifyErr error) *harness {
@@ -296,12 +328,13 @@ func newHarness(booking *model.Booking, event *checkout.WebhookEvent, verifyErr 
 			},
 			markOK: true,
 		},
-		homes:    &fakeHomeRepo{home: &model.Home{ID: booking.HomeID, Name: "Nest 1", Category: model.HomeCategoryNest, GoogleCalendarID: "cal-1", IsActive: true}},
-		provider: &fakeProvider{event: event, verifyErr: verifyErr},
-		notifier: &fakeNotifier{},
-		calendar: &fakeCalendar{eventID: "gcal-evt-1"},
+		unmatched: &fakeUnmatchedRepo{},
+		homes:     &fakeHomeRepo{home: &model.Home{ID: booking.HomeID, Name: "Nest 1", Category: model.HomeCategoryNest, GoogleCalendarID: "cal-1", IsActive: true}},
+		provider:  &fakeProvider{event: event, verifyErr: verifyErr},
+		notifier:  &fakeNotifier{},
+		calendar:  &fakeCalendar{eventID: "gcal-evt-1"},
 	}
-	h.uc = New(h.bookings, h.payments, h.provider, h.notifier, h.calendar, h.homes,
+	h.uc = New(h.bookings, h.payments, h.unmatched, h.provider, h.notifier, h.calendar, h.homes,
 		zap.NewNop(), config.Config{SePayTransferPrefix: "LAVERTE"})
 	return h
 }
@@ -650,4 +683,99 @@ func TestBookingIDFromMemo(t *testing.T) {
 // never calls.
 func (f *fakeBookingRepo) ListOccupyingBetween(context.Context, uint, time.Time, time.Time) ([]*model.Booking, error) {
 	return nil, nil
+}
+
+func assertUnmatched(t *testing.T, h *harness, reason string, bookingRef *uint) {
+	t.Helper()
+	if len(h.unmatched.rows) != 1 {
+		t.Fatalf("unmatched rows = %d, want 1", len(h.unmatched.rows))
+	}
+	got := h.unmatched.rows[0]
+	if got.Reason != reason {
+		t.Errorf("Reason = %q, want %q", got.Reason, reason)
+	}
+	switch {
+	case bookingRef == nil && got.BookingRef != nil:
+		t.Errorf("BookingRef = %d, want nil", *got.BookingRef)
+	case bookingRef != nil && (got.BookingRef == nil || *got.BookingRef != *bookingRef):
+		t.Errorf("BookingRef = %v, want %d", got.BookingRef, *bookingRef)
+	}
+	if h.notifier.unmatchedCalls != 1 {
+		t.Errorf("admin alerts = %d, want 1", h.notifier.unmatchedCalls)
+	}
+}
+
+func TestHandleSePayWebhookRecordsAmountMismatchOnce(t *testing.T) {
+	event := paidEvent()
+	event.AmountVND = 100000
+	h := newHarness(pendingBooking(), event, nil)
+
+	for range 2 { // the provider redelivers until it gets a 2xx
+		_ = h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{})
+	}
+	id := uint(42)
+	assertUnmatched(t, h, model.UnmatchedReasonAmountMismatch, &id)
+	if h.unmatched.rows[0].Amount != 100000 {
+		t.Errorf("Amount = %d, want the amount actually received", h.unmatched.rows[0].Amount)
+	}
+}
+
+func TestHandleSePayWebhookRecordsTransferForExpiredBooking(t *testing.T) {
+	booking := pendingBooking()
+	booking.Status = model.BookingStatusExpired
+	h := newHarness(booking, paidEvent(), nil)
+
+	_ = h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{})
+	id := uint(42)
+	assertUnmatched(t, h, model.UnmatchedReasonBookingNotPending, &id)
+}
+
+func TestHandleSePayWebhookRecordsTransferForUnknownBooking(t *testing.T) {
+	event := paidEvent()
+	event.ProviderRef = "LAVERTE999"
+	h := newHarness(pendingBooking(), event, nil)
+
+	err := h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{})
+	if e, ok := apperr.As(err); !ok || e.Code != apperr.CodeNotFound {
+		t.Errorf("error = %v, want apperr with Code %q", err, apperr.CodeNotFound)
+	}
+	id := uint(999)
+	assertUnmatched(t, h, model.UnmatchedReasonBookingNotFound, &id)
+}
+
+func TestHandleSePayWebhookRecordsTransferWithNoMemo(t *testing.T) {
+	event := &checkout.WebhookEvent{ExternalRef: "TXN-7", Success: true, AmountVND: 980000, Content: "CK TU NGUYEN VAN A"}
+	h := newHarness(pendingBooking(), event, checkout.ErrNoBookingMemo)
+
+	err := h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{})
+	if e, ok := apperr.As(err); !ok || e.Code != apperr.CodeValidation {
+		t.Errorf("error = %v, want apperr with Code %q", err, apperr.CodeValidation)
+	}
+	assertUnmatched(t, h, model.UnmatchedReasonNoMemo, nil)
+	if h.unmatched.rows[0].Content != "CK TU NGUYEN VAN A" {
+		t.Errorf("Content = %q, want the bank's transfer text", h.unmatched.rows[0].Content)
+	}
+}
+
+// An outgoing transfer is our own money leaving; there is nothing to reconcile.
+func TestHandleSePayWebhookIgnoresOutgoingTransferWithNoMemo(t *testing.T) {
+	event := &checkout.WebhookEvent{ExternalRef: "TXN-8", Success: false, AmountVND: 50000}
+	h := newHarness(pendingBooking(), event, checkout.ErrNoBookingMemo)
+
+	_ = h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{})
+	if len(h.unmatched.rows) != 0 {
+		t.Errorf("unmatched rows = %d, want 0 for a debit", len(h.unmatched.rows))
+	}
+}
+
+func TestHandleSePayWebhookSettledTransferIsNotUnmatched(t *testing.T) {
+	h := newHarness(pendingBooking(), paidEvent(), nil)
+
+	if err := h.uc.HandleSePayWebhook(context.Background(), []byte("{}"), http.Header{}); err != nil {
+		t.Fatalf("HandleSePayWebhook() error = %v", err)
+	}
+	if len(h.unmatched.rows) != 0 || h.notifier.unmatchedCalls != 0 {
+		t.Errorf("unmatched rows = %d, alerts = %d, want none for a settled transfer",
+			len(h.unmatched.rows), h.notifier.unmatchedCalls)
+	}
 }

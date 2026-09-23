@@ -69,9 +69,14 @@ func (z *ZNSNotifier) LockCode(ctx context.Context, b *model.Booking, code strin
 	})
 }
 
-// AdminLockCodeMissing is intentionally inert: ZNS is the customer channel and
-// the admin has no Zalo template. NewComposite routes this call to SMTP.
+// AdminLockCodeMissing and AdminUnmatchedTransfer are intentionally inert: ZNS
+// is the customer channel and the admin has no Zalo template. NewComposite routes
+// these calls to SMTP.
 func (z *ZNSNotifier) AdminLockCodeMissing(context.Context, *model.Booking) error { return nil }
+
+func (z *ZNSNotifier) AdminUnmatchedTransfer(context.Context, *model.UnmatchedTransfer) error {
+	return nil
+}
 
 func (z *ZNSNotifier) send(ctx context.Context, phone, templateID string, data map[string]string) error {
 	if z.accessToken == "" || templateID == "" {

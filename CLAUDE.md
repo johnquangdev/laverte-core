@@ -48,8 +48,13 @@ Stack: Go 1.25, Echo v4, GORM + `jackc/pgx/v5`, Redis (`go-redis/v9`),
 `pending_payment` (with `expires_at`) → SePay webhook confirms → `confirmed` →
 `completed` / `no_show`, or `cancelled` from either of the first two states.
 `completed` and `no_show` are terminal — no path may re-enter them into
-`cancelled`, because their payment is already counted as revenue and there is no
-refund concept in this system. A cron sweep (`usecase/bookingjobs`) expires abandoned
+`cancelled`, because their payment is earned revenue. A refund is a record, not a
+transfer (money goes back by hand): `repository/ledger.RefundIfStayEnded` flips a
+`paid` payment to `refunded` only while its booking is `cancelled` or `expired`,
+and revenue sums only `paid`. A bank transfer that settles no booking (unreadable
+memo, unknown booking, hold already expired, wrong amount) is kept in
+`unmatched_transfers`, deduplicated on the provider's transaction id, and alerts
+the admin once. A cron sweep (`usecase/bookingjobs`) expires abandoned
 holds, alerts the admin when a stay is about to start with no door code, and
 auto-sends the code at check-in — all through the guarded writes above.
 
@@ -109,6 +114,12 @@ configured).
   (`delivery/http/http.go`) — both JWT and the admin check are enforced at
   registration, not per-handler; verify new routes are mounted there, not on `authed`
   directly.
+- Overnight windows are wall-clock rules in the business zone: `usecase/pricing`
+  reads a booking's start in `Deps.Location`, never in whatever offset the client
+  serialised it with.
+- Admin-only reads and corrections that the settlement path never needs live in
+  their own repositories (`ledger`, `report`, `unmatchedtransfer`) so the fakes of
+  `repository/booking` and `repository/payment` don't grow with every screen.
 - Dates from admin query params (`?date=`, `?from=`, `?to=`) parse in
   `cfg.AppTimeZone` (default `Asia/Ho_Chi_Minh`), resolved once at boot into
   `Deps.Location` — never `time.Now().Location()`, which is host-TZ-dependent.

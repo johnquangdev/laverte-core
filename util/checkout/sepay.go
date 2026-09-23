@@ -198,18 +198,19 @@ func (p *sepayProvider) VerifyWebhook(_ context.Context, raw []byte, headers htt
 	// it first would silently discard a real settlement whose bank memo happened to
 	// contain the phrase — money received, booking never confirmed, nothing logged.
 	// A genuine settlement always carries a memo; the dashboard ping never does.
-	if memo == "" {
-		if isSePayWebhookPing(payload) {
-			return nil, ErrWebhookPing
-		}
-		return nil, errors.New("sepay: no recognizable booking memo in transfer content")
-	}
-
-	return &WebhookEvent{
+	event := &WebhookEvent{
 		ProviderRef: memo,
 		ExternalRef: strconv.FormatInt(payload.ID, 10),
 		Success:     payload.TransferType == "in",
 		AmountVND:   payload.TransferAmount,
+		Content:     payload.Content,
 		Raw:         string(raw),
-	}, nil
+	}
+	if memo == "" {
+		if isSePayWebhookPing(payload) {
+			return nil, ErrWebhookPing
+		}
+		return event, ErrNoBookingMemo
+	}
+	return event, nil
 }

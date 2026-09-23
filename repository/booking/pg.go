@@ -128,9 +128,9 @@ func (r *pgRepository) ConfirmIfPending(ctx context.Context, id uint, paymentID 
 }
 
 // terminalStatuses are the statuses no admin action can move a booking out of.
-// Cancelling one of them would leave the payment behind it counted as revenue by
-// SumPaidBetween while the booking claims the stay never happened, and this
-// system has no refund concept to reconcile that from.
+// Completed and no-show payments are earned revenue; cancelling such a booking
+// would make that payment refundable — refunds are recorded only against
+// cancelled or expired stays — for a stay that actually happened.
 var terminalStatuses = []string{
 	model.BookingStatusCancelled,
 	model.BookingStatusExpired,

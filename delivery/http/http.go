@@ -27,6 +27,7 @@ import (
 	bookingadminuc "github.com/johnquangdev/laverte-core/usecase/bookingadmin"
 	homeadminuc "github.com/johnquangdev/laverte-core/usecase/homeadmin"
 	overviewuc "github.com/johnquangdev/laverte-core/usecase/overview"
+	paymentadminuc "github.com/johnquangdev/laverte-core/usecase/paymentadmin"
 	pricingadminuc "github.com/johnquangdev/laverte-core/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-core/util/ratelimit"
 	"github.com/johnquangdev/laverte-core/util/tokenstore"
@@ -85,6 +86,7 @@ type Deps struct {
 	BookingAdminUC    bookingadminuc.IUseCase
 	BillingUC         billinguc.IUseCase
 	OverviewUC        overviewuc.IUseCase
+	PaymentAdminUC    paymentadminuc.IUseCase
 	// Location is the business's zone, resolved from config.AppTimeZone once at
 	// startup so a bad zone name fails the boot rather than the first admin request.
 	Location *time.Location
@@ -168,6 +170,8 @@ func NewServer(cfg config.Config, log *zap.Logger, deps Deps) *Server {
 	}
 	adminhttp.InitBookings(adminGroup, deps.BookingAdminUC, handleErr, handleOK, loc)
 	adminhttp.InitOverview(adminGroup, deps.OverviewUC, handleErr, handleOK, loc)
+	adminhttp.InitPayments(adminGroup, deps.PaymentAdminUC, handleErr, handleOK, loc)
+	adminhttp.InitSettings(adminGroup, cfg, handleOK)
 
 	return &Server{echo: e, cfg: cfg, log: log}
 }

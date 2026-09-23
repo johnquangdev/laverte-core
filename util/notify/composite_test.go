@@ -30,6 +30,11 @@ func (r *recordingNotifier) AdminLockCodeMissing(context.Context, *model.Booking
 	return r.err
 }
 
+func (r *recordingNotifier) AdminUnmatchedTransfer(context.Context, *model.UnmatchedTransfer) error {
+	r.adminAlert++
+	return r.err
+}
+
 func TestCompositeSendsCustomerMessagesOnlyToCustomerChannel(t *testing.T) {
 	customer, admin := &recordingNotifier{}, &recordingNotifier{}
 	n := NewComposite(customer, admin)

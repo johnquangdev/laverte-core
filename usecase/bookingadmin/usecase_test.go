@@ -310,6 +310,9 @@ func (f *fakeNotifier) AdminLockCodeMissing(context.Context, *model.Booking) err
 	f.alertCalls++
 	return nil
 }
+func (f *fakeNotifier) AdminUnmatchedTransfer(context.Context, *model.UnmatchedTransfer) error {
+	return nil
+}
 
 type fakeCalendar struct {
 	eventID      string

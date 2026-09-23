@@ -10,6 +10,9 @@ const (
 	PaymentStatusPaid    = "paid"
 	PaymentStatusExpired = "expired"
 	PaymentStatusFailed  = "failed"
+	// PaymentStatusRefunded records money returned by hand after the stay it paid
+	// for was cancelled or expired. Only a 'paid' row may become one.
+	PaymentStatusRefunded = "refunded"
 )
 
 type Payment struct {
@@ -23,6 +26,9 @@ type Payment struct {
 	// webhook redeliveries — it is the dedup key, not the transfer memo.
 	SePayTransactionRef string     `gorm:"column:sepay_transaction_ref" json:"sepay_transaction_ref"`
 	PaidAt              *time.Time `json:"paid_at"`
+	RefundedAt          *time.Time `json:"refunded_at"`
+	RefundedByAdminID   *uint      `json:"refunded_by_admin_id"`
+	RefundNote          string     `json:"refund_note"`
 	CreatedAt           time.Time  `json:"created_at"`
 }
 

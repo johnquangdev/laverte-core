@@ -26,6 +26,14 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 		if errors.Is(err, checkout.ErrWebhookPing) {
 			return nil
 		}
+		// Authentic, just unaddressed: a guest who typed their own note instead of
+		// the QR memo still moved real money into the account.
+		if errors.Is(err, checkout.ErrNoBookingMemo) && event != nil {
+			if event.Success {
+				uc.recordUnmatched(ctx, event, model.UnmatchedReasonNoMemo, nil)
+			}
+			return apperr.Validation("khong doc duoc booking id tu noi dung chuyen khoan")
+		}
 		return apperr.Unauthorized(err)
 	}
 
@@ -37,12 +45,14 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 
 	bookingID, err := bookingIDFromMemo(uc.cfg.SePayTransferPrefix, event.ProviderRef)
 	if err != nil {
+		uc.recordUnmatched(ctx, event, model.UnmatchedReasonNoMemo, nil)
 		return apperr.Validation("khong doc duoc booking id tu noi dung chuyen khoan")
 	}
 
 	booking, err := uc.bookingRepo.GetByID(ctx, bookingID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			uc.recordUnmatched(ctx, event, model.UnmatchedReasonBookingNotFound, &bookingID)
 			return apperr.NotFound(err)
 		}
 		return apperr.Internal(err)
@@ -54,9 +64,11 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 		return nil
 	}
 	if booking.Status != model.BookingStatusPendingPayment {
+		uc.recordUnmatched(ctx, event, model.UnmatchedReasonBookingNotPending, &booking.ID)
 		return apperr.BookingExpired(nil)
 	}
 	if event.AmountVND != booking.ComputedPrice {
+		uc.recordUnmatched(ctx, event, model.UnmatchedReasonAmountMismatch, &booking.ID)
 		return apperr.AmountMismatch(nil)
 	}
 
@@ -142,6 +154,38 @@ func (uc *UseCase) HandleSePayWebhook(ctx context.Context, raw []byte, headers h
 	}
 
 	return nil
+}
+
+// recordUnmatched keeps a transfer that reached the account but settled nothing,
+// so an admin can refund or reconcile it. It is best-effort by design: every
+// caller still answers the provider with a non-2xx, so a failed insert gets
+// another attempt on the next redelivery. The alert goes out only on the first
+// insert; a redelivery after a failed alert still leaves the row in the admin list.
+func (uc *UseCase) recordUnmatched(ctx context.Context, event *checkout.WebhookEvent, reason string, bookingRef *uint) {
+	t := &model.UnmatchedTransfer{
+		SePayTransactionRef: event.ExternalRef,
+		Amount:              event.AmountVND,
+		Content:             event.Content,
+		Reason:              reason,
+		BookingRef:          bookingRef,
+		ReceivedAt:          time.Now(),
+	}
+	inserted, err := uc.unmatchedRepo.RecordIfNew(ctx, t)
+	if err != nil {
+		uc.log.Error("webhook: record unmatched transfer failed",
+			zap.String("external_ref", event.ExternalRef),
+			zap.String("reason", reason),
+			zap.Int64("amount", event.AmountVND),
+			zap.Error(err))
+		return
+	}
+	if !inserted {
+		return
+	}
+	if err := uc.notifier.AdminUnmatchedTransfer(ctx, t); err != nil {
+		uc.log.Error("webhook: unmatched-transfer alert failed",
+			zap.String("external_ref", event.ExternalRef), zap.Error(err))
+	}
 }
 
 func (uc *UseCase) pushCalendarEvent(ctx context.Context, b *model.Booking) {

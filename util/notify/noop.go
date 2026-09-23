@@ -17,3 +17,6 @@ func NewNoop() INotifier { return noopNotifier{} }
 func (noopNotifier) BookingConfirmed(context.Context, *model.Booking) error     { return nil }
 func (noopNotifier) LockCode(context.Context, *model.Booking, string) error     { return nil }
 func (noopNotifier) AdminLockCodeMissing(context.Context, *model.Booking) error { return nil }
+func (noopNotifier) AdminUnmatchedTransfer(context.Context, *model.UnmatchedTransfer) error {
+	return nil
+}

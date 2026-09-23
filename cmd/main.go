@@ -18,9 +18,12 @@ import (
 	blockedslotrepo "github.com/johnquangdev/laverte-core/repository/blockedslot"
 	bookingrepo "github.com/johnquangdev/laverte-core/repository/booking"
 	homerepo "github.com/johnquangdev/laverte-core/repository/home"
+	ledgerrepo "github.com/johnquangdev/laverte-core/repository/ledger"
 	paymentrepo "github.com/johnquangdev/laverte-core/repository/payment"
 	pricingrulerepo "github.com/johnquangdev/laverte-core/repository/pricingrule"
 	refreshtokenrepo "github.com/johnquangdev/laverte-core/repository/refreshtoken"
+	reportrepo "github.com/johnquangdev/laverte-core/repository/report"
+	unmatchedtransferrepo "github.com/johnquangdev/laverte-core/repository/unmatchedtransfer"
 	userrepo "github.com/johnquangdev/laverte-core/repository/user"
 	adminuc "github.com/johnquangdev/laverte-core/usecase/admin"
 	authuc "github.com/johnquangdev/laverte-core/usecase/auth"
@@ -31,6 +34,7 @@ import (
 	bookingjobsuc "github.com/johnquangdev/laverte-core/usecase/bookingjobs"
 	homeadminuc "github.com/johnquangdev/laverte-core/usecase/homeadmin"
 	overviewuc "github.com/johnquangdev/laverte-core/usecase/overview"
+	paymentadminuc "github.com/johnquangdev/laverte-core/usecase/paymentadmin"
 	pricinguc "github.com/johnquangdev/laverte-core/usecase/pricing"
 	pricingadminuc "github.com/johnquangdev/laverte-core/usecase/pricingadmin"
 	"github.com/johnquangdev/laverte-core/util/checkout"
@@ -68,11 +72,14 @@ func main() {
 	users := userrepo.NewPG(dbFactory)
 	tokens := refreshtokenrepo.NewPG(dbFactory)
 	homes := homerepo.NewPG(dbFactory)
-	// pricingRules also backs the booking usecase's pricinguc.New(pricingRules).
+	// pricingRules also backs the booking usecase's pricinguc.New.
 	pricingRules := pricingrulerepo.NewPG(dbFactory)
 	blockedSlots := blockedslotrepo.NewPG(dbFactory)
 	bookings := bookingrepo.NewPG(dbFactory)
 	payments := paymentrepo.NewPG(dbFactory)
+	unmatchedTransfers := unmatchedtransferrepo.NewPG(dbFactory)
+	reports := reportrepo.NewPG(dbFactory)
+	ledger := ledgerrepo.NewPG(dbFactory)
 
 	oauthSvc := oauth.NewGoogle(cfg)
 	tokenStore := tokenstore.NewRedis(cfg)
@@ -84,7 +91,7 @@ func main() {
 	homeAdminUC := homeadminuc.New(homes)
 	pricingAdminUC := pricingadminuc.New(pricingRules)
 	blockedSlotUC := blockedslotuc.New(blockedSlots)
-	pricingUC := pricinguc.New(pricingRules)
+	pricingUC := pricinguc.New(pricingRules, appLocation)
 	bookingUC := bookinguc.New(bookings, homes, blockedSlots, payments, pricingUC, sepay, *cfg, log)
 
 	// Calendar push is best-effort per design doc §5, so a missing or invalid
@@ -97,9 +104,10 @@ func main() {
 	}
 	notifier := notify.FromConfig(cfg, log)
 
-	billingUC := billinguc.New(bookings, payments, sepay, notifier, calendarSvc, homes, log, *cfg)
+	billingUC := billinguc.New(bookings, payments, unmatchedTransfers, sepay, notifier, calendarSvc, homes, log, *cfg)
 	bookingAdminUC := bookingadminuc.New(bookings, homes, blockedSlots, payments, pricingUC, notifier, calendarSvc, log)
-	overviewUC := overviewuc.New(payments, bookings)
+	overviewUC := overviewuc.New(payments, bookings, reports, homes, appLocation)
+	paymentAdminUC := paymentadminuc.New(ledger, unmatchedTransfers)
 
 	adminRoleResolver := jwtmw.AdminRoleResolverFunc(func(ctx context.Context, userID uint) (string, error) {
 		u, err := users.GetByID(ctx, userID)
@@ -122,6 +130,7 @@ func main() {
 		BookingAdminUC:    bookingAdminUC,
 		BillingUC:         billingUC,
 		OverviewUC:        overviewUC,
+		PaymentAdminUC:    paymentAdminUC,
 		Location:          appLocation,
 	})
 

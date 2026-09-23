@@ -29,6 +29,9 @@ func (f *fakeUserRepo) GetByID(_ context.Context, id uint) (*model.User, error) 
 	}
 	return u, nil
 }
+func (f *fakeUserRepo) GetByEmail(context.Context, string) (*model.User, error) {
+	return nil, gorm.ErrRecordNotFound
+}
 func (f *fakeUserRepo) Create(_ context.Context, u *model.User) error                  { f.users[u.ID] = u; return nil }
 func (f *fakeUserRepo) ListByRole(context.Context, string) ([]*model.User, error)      { return nil, nil }
 func (f *fakeUserRepo) SetRole(context.Context, uint, string, *uint, *time.Time) error { return nil }

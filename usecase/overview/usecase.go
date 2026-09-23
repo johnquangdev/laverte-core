@@ -7,16 +7,29 @@ import (
 	apperr "github.com/johnquangdev/laverte-core/errors"
 	"github.com/johnquangdev/laverte-core/presenter"
 	bookingrepo "github.com/johnquangdev/laverte-core/repository/booking"
+	homerepo "github.com/johnquangdev/laverte-core/repository/home"
 	paymentrepo "github.com/johnquangdev/laverte-core/repository/payment"
+	reportrepo "github.com/johnquangdev/laverte-core/repository/report"
 )
 
 type UseCase struct {
 	paymentRepo paymentrepo.IRepository
 	bookingRepo bookingrepo.IRepository
+	reportRepo  reportrepo.IRepository
+	homeRepo    homerepo.IRepository
+	// loc buckets the breakdown's months and days. It must be a named IANA zone:
+	// the monthly queries hand loc.String() to Postgres's AT TIME ZONE.
+	loc *time.Location
 }
 
-func New(paymentRepo paymentrepo.IRepository, bookingRepo bookingrepo.IRepository) IUseCase {
-	return &UseCase{paymentRepo: paymentRepo, bookingRepo: bookingRepo}
+func New(
+	paymentRepo paymentrepo.IRepository,
+	bookingRepo bookingrepo.IRepository,
+	reportRepo reportrepo.IRepository,
+	homeRepo homerepo.IRepository,
+	loc *time.Location,
+) IUseCase {
+	return &UseCase{paymentRepo: paymentRepo, bookingRepo: bookingRepo, reportRepo: reportRepo, homeRepo: homeRepo, loc: loc}
 }
 
 func (uc *UseCase) Summary(ctx context.Context, from, to time.Time) (*presenter.OverviewResponse, error) {

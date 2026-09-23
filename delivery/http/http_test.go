@@ -109,11 +109,32 @@ type stubBillingUC struct{}
 func (stubBillingUC) HandleSePayWebhook(context.Context, []byte, http.Header) error { return nil }
 
 // stubOverviewUC records the range it was handed, for the same reason.
-type stubOverviewUC struct{ gotFrom, gotTo time.Time }
+type stubOverviewUC struct{ gotFrom, gotTo, gotMonth time.Time }
 
 func (s *stubOverviewUC) Summary(_ context.Context, from, to time.Time) (*presenter.OverviewResponse, error) {
 	s.gotFrom, s.gotTo = from, to
 	return &presenter.OverviewResponse{}, nil
+}
+
+func (s *stubOverviewUC) Breakdown(_ context.Context, month time.Time) (*presenter.OverviewBreakdownResponse, error) {
+	s.gotMonth = month
+	return &presenter.OverviewBreakdownResponse{}, nil
+}
+
+type stubPaymentAdminUC struct{ gotFrom, gotTo time.Time }
+
+func (s *stubPaymentAdminUC) List(_ context.Context, from, to time.Time) ([]presenter.AdminPaymentResponse, error) {
+	s.gotFrom, s.gotTo = from, to
+	return nil, nil
+}
+func (*stubPaymentAdminUC) Refund(context.Context, uint, uint, string) (*presenter.AdminPaymentResponse, error) {
+	return &presenter.AdminPaymentResponse{}, nil
+}
+func (*stubPaymentAdminUC) ListUnmatched(context.Context, bool) ([]presenter.UnmatchedTransferResponse, error) {
+	return nil, nil
+}
+func (*stubPaymentAdminUC) ResolveUnmatched(context.Context, uint, uint, string) (*presenter.UnmatchedTransferResponse, error) {
+	return &presenter.UnmatchedTransferResponse{}, nil
 }
 
 // stubTokenStore reports nothing revoked, so router tests need no Redis.
@@ -140,6 +161,7 @@ func newTestServer() *Server {
 		BookingAdminUC:    &stubBookingAdminUC{},
 		BillingUC:         stubBillingUC{},
 		OverviewUC:        &stubOverviewUC{},
+		PaymentAdminUC:    &stubPaymentAdminUC{},
 	})
 }
 
@@ -176,6 +198,7 @@ func TestAdminHomeCreateRejectsEmptyBody(t *testing.T) {
 		BookingAdminUC:    &stubBookingAdminUC{},
 		BillingUC:         stubBillingUC{},
 		OverviewUC:        &stubOverviewUC{},
+		PaymentAdminUC:    &stubPaymentAdminUC{},
 	})
 
 	token, err := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7}, time.Hour)
@@ -201,13 +224,20 @@ var testZone = time.FixedZone("TESTZONE", 13*60*60)
 // adminServer wires a router whose admin date parsing must use testZone, and hands
 // back the recording stubs so a test can read what the handlers computed.
 func adminServer(t *testing.T) (*Server, *stubBookingAdminUC, *stubOverviewUC, string) {
+	srv, bookings, overview, _, token := adminServerWithPayments(t)
+	return srv, bookings, overview, token
+}
+
+func adminServerWithPayments(t *testing.T) (*Server, *stubBookingAdminUC, *stubOverviewUC, *stubPaymentAdminUC, string) {
 	t.Helper()
 	cfg := config.Config{
 		FrontendURL: "http://localhost:3000", JWTAccessSecret: "test-secret", AdminUserIDs: []uint{7},
 		RateLimitAuthedPerMin: 100,
 	}
+	cfg.SePayWebhookSecret = "never-leaves-the-server"
 	bookings := &stubBookingAdminUC{}
 	overview := &stubOverviewUC{}
+	payments := &stubPaymentAdminUC{}
 	srv := NewServer(cfg, zap.NewNop(), Deps{
 		Limiter:           ratelimit.NewMemory(),
 		TokenStore:        stubTokenStore{},
@@ -221,16 +251,17 @@ func adminServer(t *testing.T) (*Server, *stubBookingAdminUC, *stubOverviewUC, s
 		BookingAdminUC:    bookings,
 		BillingUC:         stubBillingUC{},
 		OverviewUC:        overview,
+		PaymentAdminUC:    payments,
 		Location:          testZone,
 	})
 	token, err := util.GenerateToken(cfg.JWTAccessSecret, util.Claims{UserID: 7}, time.Hour)
 	if err != nil {
 		t.Fatalf("GenerateToken() error = %v", err)
 	}
-	return srv, bookings, overview, token
+	return srv, bookings, overview, payments, token
 }
 
-func adminGET(t *testing.T, srv *Server, token, target string) {
+func adminGET(t *testing.T, srv *Server, token, target string) string {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -239,6 +270,7 @@ func adminGET(t *testing.T, srv *Server, token, target string) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET %s status = %d, want 200 (body: %s)", target, rec.Code, rec.Body.String())
 	}
+	return rec.Body.String()
 }
 
 // TestAdminBookingListParsesDateInConfiguredZone pins which clock a ?date= means.
@@ -288,6 +320,52 @@ func TestAdminOverviewDefaultWindowUsesConfiguredZone(t *testing.T) {
 	}
 	if _, offset := overview.gotTo.Zone(); offset != 13*60*60 {
 		t.Errorf("to offset = %ds, want the configured zone's 46800s", offset)
+	}
+}
+
+func TestAdminOverviewBreakdownParsesMonthInConfiguredZone(t *testing.T) {
+	srv, _, overview, token := adminServer(t)
+
+	adminGET(t, srv, token, "/api/v1/admin/overview/breakdown?month=2026-08")
+
+	want := time.Date(2026, 8, 1, 0, 0, 0, 0, testZone)
+	if !overview.gotMonth.Equal(want) {
+		t.Errorf("month = %v, want %v", overview.gotMonth, want)
+	}
+}
+
+func TestAdminPaymentsParsesRangeInConfiguredZone(t *testing.T) {
+	srv, _, _, payments, token := adminServerWithPayments(t)
+
+	adminGET(t, srv, token, "/api/v1/admin/payments?from=2026-08-01&to=2026-08-08")
+
+	if want := time.Date(2026, 8, 1, 0, 0, 0, 0, testZone); !payments.gotFrom.Equal(want) {
+		t.Errorf("from = %v, want %v", payments.gotFrom, want)
+	}
+	if want := time.Date(2026, 8, 8, 0, 0, 0, 0, testZone); !payments.gotTo.Equal(want) {
+		t.Errorf("to = %v, want %v", payments.gotTo, want)
+	}
+}
+
+// The settings view is admin-only and must report a secret's presence, never
+// its value.
+func TestAdminSettingsNeverEchoesSecrets(t *testing.T) {
+	srv, _, _, token := adminServer(t)
+
+	body := adminGET(t, srv, token, "/api/v1/admin/settings")
+
+	if strings.Contains(body, "never-leaves-the-server") {
+		t.Fatalf("settings body leaks the webhook secret: %s", body)
+	}
+	if !strings.Contains(body, `"webhook_secret_set":true`) {
+		t.Errorf("settings body = %s, want webhook_secret_set true", body)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/settings", nil)
+	rec := httptest.NewRecorder()
+	srv.Echo().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated GET /admin/settings status = %d, want 401", rec.Code)
 	}
 }
 

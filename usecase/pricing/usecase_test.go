@@ -38,7 +38,7 @@ func TestComputeHourlyWithinBaseHours(t *testing.T) {
 		Category: model.HomeCategoryHome, RuleType: model.PricingRuleTypeHourly,
 		BaseHours: intp(2), BasePrice: int64p(200000), ExtraHourPrice: int64p(50000),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 	end := start.Add(90 * time.Minute)
 	price, err := uc.Compute(context.Background(), model.HomeCategoryHome, model.PricingRuleTypeHourly, start, end, start)
@@ -55,7 +55,7 @@ func TestComputeHourlyChargesRoundedExtraHours(t *testing.T) {
 		Category: model.HomeCategoryHome, RuleType: model.PricingRuleTypeHourly,
 		BaseHours: intp(2), BasePrice: int64p(200000), ExtraHourPrice: int64p(50000),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 	end := start.Add(3*time.Hour + 20*time.Minute) // 1h20m extra -> rounds up to 2 extra hours
 	price, err := uc.Compute(context.Background(), model.HomeCategoryHome, model.PricingRuleTypeHourly, start, end, start)
@@ -72,7 +72,7 @@ func TestComputeOvernightWithinWindow(t *testing.T) {
 		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeOvernight,
 		FlatPrice: int64p(500000), WindowStart: strp("22:00"), WindowEnd: strp("06:00"),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 1, 23, 30, 0, 0, time.UTC) // inside 22:00-06:00 wrap
 	end := start.Add(8 * time.Hour)
 	price, err := uc.Compute(context.Background(), model.HomeCategoryNest, model.PricingRuleTypeOvernight, start, end, start)
@@ -89,7 +89,7 @@ func TestComputeOvernightOutsideWindowRejected(t *testing.T) {
 		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeOvernight,
 		FlatPrice: int64p(500000), WindowStart: strp("22:00"), WindowEnd: strp("06:00"),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 1, 14, 0, 0, 0, time.UTC) // 14:00 is outside 22:00-06:00
 	end := start.Add(8 * time.Hour)
 	if _, err := uc.Compute(context.Background(), model.HomeCategoryNest, model.PricingRuleTypeOvernight, start, end, start); err == nil {
@@ -105,7 +105,7 @@ func TestComputeHourlyExactHourBoundaries(t *testing.T) {
 		Category: model.HomeCategoryHome, RuleType: model.PricingRuleTypeHourly,
 		BaseHours: intp(2), BasePrice: int64p(200000), ExtraHourPrice: int64p(50000),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 
 	cases := []struct {
@@ -140,7 +140,7 @@ func TestComputeFlatChargesPerDayUnit(t *testing.T) {
 		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeDay,
 		FlatPrice: int64p(800000),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 1, 14, 0, 0, 0, time.UTC)
 
 	cases := []struct {
@@ -175,7 +175,7 @@ func TestComputeOvernightChargesPerNightInsideWindow(t *testing.T) {
 		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeOvernight,
 		FlatPrice: int64p(500000), WindowStart: strp("22:00"), WindowEnd: strp("06:00"),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 3, 22, 0, 0, 0, time.UTC)
 
 	got, err := uc.Compute(context.Background(), model.HomeCategoryNest,
@@ -209,7 +209,7 @@ func TestComputeDayFlatPrice(t *testing.T) {
 		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeDay,
 		FlatPrice: int64p(900000),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
 
 	got, err := uc.Compute(context.Background(), model.HomeCategoryNest,
@@ -228,7 +228,7 @@ func TestComputeDayIgnoresTimeOfDay(t *testing.T) {
 		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeDay,
 		FlatPrice: int64p(900000),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	for _, hour := range []int{0, 3, 13, 23} {
 		start := time.Date(2026, 8, 1, hour, 0, 0, 0, time.UTC)
 		if _, err := uc.Compute(context.Background(), model.HomeCategoryNest,
@@ -245,7 +245,7 @@ func TestComputeOvernightRejectsMalformedWindow(t *testing.T) {
 		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeOvernight,
 		FlatPrice: int64p(500000), WindowStart: strp("2200"), WindowEnd: strp("06:00"),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 1, 23, 0, 0, 0, time.UTC)
 
 	if _, err := uc.Compute(context.Background(), model.HomeCategoryNest,
@@ -260,7 +260,7 @@ func TestComputeOvernightRejectsZeroWidthWindow(t *testing.T) {
 		Category: model.HomeCategoryNest, RuleType: model.PricingRuleTypeOvernight,
 		FlatPrice: int64p(500000), WindowStart: strp("22:00"), WindowEnd: strp("22:00"),
 	}}}
-	uc := New(repo)
+	uc := New(repo, time.UTC)
 	start := time.Date(2026, 8, 1, 22, 0, 0, 0, time.UTC)
 
 	if _, err := uc.Compute(context.Background(), model.HomeCategoryNest,
@@ -270,9 +270,43 @@ func TestComputeOvernightRejectsZeroWidthWindow(t *testing.T) {
 }
 
 func TestComputeNoMatchingRule(t *testing.T) {
-	uc := New(&fakePricingRuleRepo{})
+	uc := New(&fakePricingRuleRepo{}, time.UTC)
 	start := time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC)
 	if _, err := uc.Compute(context.Background(), model.HomeCategoryHome, model.PricingRuleTypeDay, start, start.Add(time.Hour), start); err == nil {
 		t.Fatal("Compute() with no rules = nil error, want error")
+	}
+}
+
+// The window is a wall-clock rule in the business zone, so the offset a client
+// happens to serialise the start with must not move a booking in or out of it.
+func TestComputeOvernightReadsWindowInBusinessZone(t *testing.T) {
+	vn := time.FixedZone("ICT", 7*60*60)
+	repo := &fakePricingRuleRepo{rules: []*model.PricingRule{{
+		Category: model.HomeCategoryHome, RuleType: model.PricingRuleTypeOvernight,
+		FlatPrice: int64p(500000), WindowStart: strp("22:00"), WindowEnd: strp("06:00"),
+	}}}
+	uc := New(repo, vn)
+
+	cases := []struct {
+		name   string
+		start  time.Time
+		inside bool
+	}{
+		{"22:00 local sent as UTC", time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC), true},
+		{"05:00 local sent as UTC", time.Date(2026, 8, 1, 22, 0, 0, 0, time.UTC), true},
+		{"17:00 local sent as UTC", time.Date(2026, 8, 1, 10, 0, 0, 0, time.UTC), false},
+		{"23:30 local sent with offset", time.Date(2026, 8, 1, 23, 30, 0, 0, vn), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := uc.Compute(context.Background(), model.HomeCategoryHome, model.PricingRuleTypeOvernight,
+				tc.start, tc.start.Add(8*time.Hour), tc.start)
+			if tc.inside && err != nil {
+				t.Errorf("Compute() error = %v, want the start accepted as inside the window", err)
+			}
+			if !tc.inside && err == nil {
+				t.Error("Compute() = nil error, want the start rejected as outside the window")
+			}
+		})
 	}
 }

@@ -191,6 +191,24 @@ func TestVerifyWebhookDetectsPingWhenNoMemo(t *testing.T) {
 	}
 }
 
+// A guest who types their own note instead of the QR memo still sent real
+// money: the event must survive alongside the sentinel so it can be recorded.
+func TestVerifyWebhookReturnsEventWithNoMemo(t *testing.T) {
+	body := []byte(`{"id":4242,"accountNumber":"0123456789","code":"","content":"CK TU NGUYEN VAN A","transferAmount":980000,"transferType":"in"}`)
+	headers := signedHeaders(body, testWebhookSecret, time.Now())
+
+	ev, err := testSePay().VerifyWebhook(context.Background(), body, headers)
+	if !errors.Is(err, ErrNoBookingMemo) {
+		t.Fatalf("VerifyWebhook() error = %v, want ErrNoBookingMemo", err)
+	}
+	if ev == nil {
+		t.Fatal("VerifyWebhook() event = nil, want the authenticated event")
+	}
+	if ev.ExternalRef != "4242" || ev.AmountVND != 980000 || ev.Content != "CK TU NGUYEN VAN A" || ev.ProviderRef != "" {
+		t.Errorf("event = %+v, want ref 4242, amount 980000, the raw content and no provider ref", ev)
+	}
+}
+
 // TestParseBookingMemoScansEveryOccurrence covers a memo whose first prefix
 // occurrence carries no digits (a payer's free-text note) and whose booking id
 // only appears at a later occurrence (the QR's own memo).

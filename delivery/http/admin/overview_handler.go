@@ -51,3 +51,21 @@ func (h *OverviewHandler) summary(c echo.Context) error {
 	}
 	return h.handleOK(c, resp)
 }
+
+// breakdown reads ?month=YYYY-MM in the business zone, defaulting to the
+// current month.
+func (h *OverviewHandler) breakdown(c echo.Context) error {
+	month := time.Now().In(h.loc)
+	if raw := c.QueryParam("month"); raw != "" {
+		parsed, err := time.ParseInLocation("2006-01", raw, h.loc)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid month, want YYYY-MM"})
+		}
+		month = parsed
+	}
+	resp, err := h.uc.Breakdown(c.Request().Context(), month)
+	if err != nil {
+		return h.handleErr(c, err)
+	}
+	return h.handleOK(c, resp)
+}

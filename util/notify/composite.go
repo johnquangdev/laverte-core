@@ -28,3 +28,7 @@ func (c *composite) LockCode(ctx context.Context, b *model.Booking, code string)
 func (c *composite) AdminLockCodeMissing(ctx context.Context, b *model.Booking) error {
 	return c.admin.AdminLockCodeMissing(ctx, b)
 }
+
+func (c *composite) AdminUnmatchedTransfer(ctx context.Context, t *model.UnmatchedTransfer) error {
+	return c.admin.AdminUnmatchedTransfer(ctx, t)
+}

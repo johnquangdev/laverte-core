@@ -297,6 +297,9 @@ func (f *fakeNotifier) AdminLockCodeMissing(context.Context, *model.Booking) err
 	f.alertCalls++
 	return f.alertErr
 }
+func (f *fakeNotifier) AdminUnmatchedTransfer(context.Context, *model.UnmatchedTransfer) error {
+	return nil
+}
 
 func newTestUseCase() (*UseCase, *fakeBookingRepo, *fakePaymentRepo, *fakeNotifier) {
 	bookings := newFakeBookingRepo()

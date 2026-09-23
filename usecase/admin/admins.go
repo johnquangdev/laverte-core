@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -35,8 +36,22 @@ func (uc *UseCase) ListAdmins(ctx context.Context) ([]presenter.AdminListItemRes
 }
 
 func (uc *UseCase) GrantAdmin(ctx context.Context, req payload.GrantAdminRequest, grantedBy uint) error {
+	userID := req.UserID
+	if email := strings.TrimSpace(req.Email); email != "" {
+		u, err := uc.userRepo.GetByEmail(ctx, email)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apperr.Validation("chua co tai khoan nao dung email nay — nguoi do can dang nhap bang Google mot lan truoc")
+			}
+			return apperr.Internal(err)
+		}
+		userID = u.ID
+	}
+	if userID == 0 {
+		return apperr.Validation("nhap email hoac user_id cua nguoi can cap quyen")
+	}
 	now := time.Now()
-	return uc.setRole(ctx, req.UserID, model.RoleAdmin, &grantedBy, &now)
+	return uc.setRole(ctx, userID, model.RoleAdmin, &grantedBy, &now)
 }
 
 func (uc *UseCase) RevokeAdmin(ctx context.Context, userID uint) error {
