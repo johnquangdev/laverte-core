@@ -1,6 +1,9 @@
 # laverte-core
 
 Go backend for a homestay booking system: 3 properties in 2 tiers (`home`, `nest`).
+This repo is the API only — the guest site and the one admin UI live in
+`laverte-home-frontend` (`/book`, `/admin/*`), which calls this API through its
+own server-side proxy.
 Guests book by the hour, overnight, or by the day, **without an account** — name and
 phone only — and **pay before the slot is held**. Admins use Google OAuth to manage
 pricing, walk-in bookings, blocked slots, door lock codes, and a revenue overview.
